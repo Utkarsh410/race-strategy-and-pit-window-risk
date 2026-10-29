@@ -1,0 +1,204 @@
+# =============================================================================
+# RaceSim default race configuration  -  SYNTHETIC DEMONSTRATION ONLY
+# =============================================================================
+# All values below are plausible but ILLUSTRATIVE. They do not describe any
+# real circuit, championship, team, car or tyre manufacturer.
+#
+# Units: time in seconds (s), fuel in kilograms (kg), laps as integers,
+# temperatures in degrees Celsius.
+#
+# PIT-LOSS CONVENTION (used consistently by the code):
+#   pit_lane_loss_s        = time lost driving through the pit lane (entry +
+#                            transit + exit) versus staying on track, EXCLUDING
+#                            the stationary service time.
+#   stationary_stop_time_s = mean time the car is stationary in the box.
+#   total green-flag pit cost = pit_lane_loss_s + stationary_stop_time_s
+#                               (+ pit_stop.rejoin_loss_s, default 0).
+#   The out-lap tyre warm-up penalty belongs to the tyre model, NOT the pit cost.
+# =============================================================================
+
+race:
+  race_name: "Synthetic Demo Grand Prix"
+  circuit_name: "Synthetic Circuit A (fictional)"
+  total_laps: 60
+  baseline_lap_time_s: 100.0        # empty tank, fresh reference tyre, ref. track temp
+  pit_lane_loss_s: 20.0             # excludes stationary time (see convention above)
+  stationary_stop_time_s: 2.5
+  pit_loss_std_s: 0.8
+  baseline_lap_time_std_s: 0.35     # lap-to-lap random variability
+  fuel_start_kg: 110.0
+  fuel_consumption_kg_per_lap: 1.75  # explicit ASSUMPTION (no measured data)
+  fuel_effect_s_per_kg: 0.03
+  safety_car_probability_per_lap: 0.012
+  vsc_probability_per_lap: 0.010
+  track_temperature_c: 38.0
+  ambient_temperature_c: 24.0
+  reference_track_temperature_c: 35.0
+  simulation_seed: 42
+  simulation_count: 10000
+  minimum_stint_laps: 8
+  maximum_stint_laps: 45
+  minimum_pit_laps_remaining: 3
+  maximum_strategy_candidates: 4000
+  maximum_stops: 3
+  standing_start_loss_s: 2.0
+  track_evolution_s_per_lap: 0.0
+  track_evolution_cap_s: 0.0
+  data_label: "SYNTHETIC DEMONSTRATION PARAMETERS - not a real circuit"
+
+compounds:
+  SOFT:
+    reference_lap_time_s: 99.3
+    linear_degradation_s_per_lap: 0.085
+    nonlinear_degradation_coefficient: 0.008
+    nonlinear_degradation_threshold_laps: 14
+    warmup_penalty_s: 0.8
+    warmup_decay_laps: 0.8
+    degradation_uncertainty: 0.15
+    temperature_sensitivity: 0.025
+    maximum_recommended_age_laps: 22
+    compound_type: dry
+  MEDIUM:
+    reference_lap_time_s: 99.9
+    linear_degradation_s_per_lap: 0.04
+    nonlinear_degradation_coefficient: 0.004
+    nonlinear_degradation_threshold_laps: 24
+    warmup_penalty_s: 1.2
+    warmup_decay_laps: 1.0
+    degradation_uncertainty: 0.15
+    temperature_sensitivity: 0.02
+    maximum_recommended_age_laps: 34
+    compound_type: dry
+  HARD:
+    reference_lap_time_s: 100.5
+    linear_degradation_s_per_lap: 0.025
+    nonlinear_degradation_coefficient: 0.002
+    nonlinear_degradation_threshold_laps: 34
+    warmup_penalty_s: 1.8
+    warmup_decay_laps: 1.3
+    degradation_uncertainty: 0.15
+    temperature_sensitivity: 0.015
+    maximum_recommended_age_laps: 45
+    compound_type: dry
+  INTERMEDIATE:
+    reference_lap_time_s: 106.0
+    linear_degradation_s_per_lap: 0.06
+    nonlinear_degradation_coefficient: 0.0
+    nonlinear_degradation_threshold_laps: 0
+    warmup_penalty_s: 1.0
+    warmup_decay_laps: 1.0
+    degradation_uncertainty: 0.25
+    temperature_sensitivity: 0.0
+    maximum_recommended_age_laps: 30
+    compound_type: intermediate
+    degradation_model: linear
+  WET:
+    reference_lap_time_s: 109.0
+    linear_degradation_s_per_lap: 0.05
+    nonlinear_degradation_coefficient: 0.0
+    nonlinear_degradation_threshold_laps: 0
+    warmup_penalty_s: 1.0
+    warmup_decay_laps: 1.0
+    degradation_uncertainty: 0.25
+    temperature_sensitivity: 0.0
+    maximum_recommended_age_laps: 35
+    compound_type: wet
+    degradation_model: linear
+
+pit_stop:
+  # Optional component split; must sum to race.pit_lane_loss_s when given.
+  pit_entry_loss_s: 5.5
+  pit_transit_loss_s: 10.5
+  pit_exit_loss_s: 4.0
+  stationary_std_s: 0.3
+  slow_stop_probability: 0.03
+  slow_stop_extra_s: 4.0
+  rejoin_loss_s: 0.0
+  # Circuit-specific neutralised pit-lane losses (NOT a fixed percentage).
+  sc_pit_lane_loss_s: 9.0
+  vsc_pit_lane_loss_s: 12.5
+  neutralised_pit_loss_std_s: 1.5
+
+race_control:
+  sc_duration_min_laps: 3
+  sc_duration_max_laps: 6
+  vsc_duration_min_laps: 1
+  vsc_duration_max_laps: 3
+  sc_lap_time_factor: 1.40
+  vsc_lap_time_factor: 1.30
+  sc_tyre_wear_factor: 0.3
+  vsc_tyre_wear_factor: 0.4
+  sc_fuel_factor: 0.6
+  vsc_fuel_factor: 0.7
+  sc_restart_loss_s: 1.0
+  vsc_restart_loss_s: 0.3
+  earliest_event_lap: 2
+  no_new_event_final_laps: 2
+  cooldown_laps: 3
+  sc_bunching_gap_s: 0.8
+  react_to_neutralisation: true
+  neutralisation_pit_advance_max_laps: 12
+
+weather:
+  scenario: stable                 # stable | rising_temperature | cooling_temperature | rain_onset
+  temperature_change_c_per_lap: 0.0
+  wet_weather_enabled: true
+  rain_probability_per_race: 0.0   # random rain onset in Monte Carlo (0 = dry race)
+  rain_onset_lap: null
+  rain_duration_laps: 10
+  wetness_increase_per_lap: 0.15
+  drying_rate_per_lap: 0.05
+  peak_wetness: 0.6
+  rain_track_cooling_c_per_lap: 0.5
+  dry_tyre_wet_penalty_s: 25.0
+  intermediate_optimal_wetness: 0.45
+  intermediate_mismatch_penalty_s: 8.0
+  wet_optimal_wetness: 0.85
+  wet_mismatch_penalty_s: 10.0
+  react_to_rain: true
+  calibration_status: "UNCALIBRATED - illustrative only"
+
+traffic:
+  traffic_probability_per_lap: 0.08
+  traffic_mean_loss_s: 0.6
+  dirty_air_threshold_s: 1.0
+  dirty_air_loss_s_per_lap: 0.4
+  overtake_pace_delta_s: 0.8
+
+rivals:
+  - rival_id: RIVAL_1
+    name: "Synthetic Rival A"
+    pace_offset_s: 0.05
+    degradation_multiplier: 1.05
+    start_gap_s: -2.0              # rival starts 2.0 s ahead
+    pit_laps: [24]
+    compounds: [MEDIUM, HARD]
+  - rival_id: RIVAL_2
+    name: "Synthetic Rival B"
+    pace_offset_s: 0.10
+    degradation_multiplier: 0.95
+    start_gap_s: 3.0
+    pit_laps: [18, 40]
+    compounds: [SOFT, MEDIUM, MEDIUM]
+
+monte_carlo:
+  default_simulations: 10000
+  dashboard_simulations: 1000
+  batch_size: 5000
+  include_parameter_uncertainty: true
+  include_lap_variability: true
+  include_event_uncertainty: true
+  include_pit_variability: true
+  include_traffic: true
+  reactive_strategy: true
+  baseline_pace_uncertainty_s: 0.15
+  fuel_consumption_uncertainty: 0.02
+  tail_warning_min_samples: 50
+
+# Reference plan for "probability of beating the baseline".
+baseline_strategy:
+  pit_laps: [26]
+  compounds: [MEDIUM, HARD]
+
+driver_offsets_s:
+  DRIVER_1: 0.0

@@ -1,0 +1,26 @@
+# =============================================================================
+# RaceSim default regulations  -  FICTIONAL "Synthetic Sprint Series"
+# =============================================================================
+# These rules are illustrative and are NOT the rules of Formula 1, GT3, WEC or
+# any other real championship. Configure a separate file for each real series.
+#
+# A value of `null` means "not configured": the constraint is DISABLED and the
+# application shows a warning. Refuelling left as `null` is treated as NOT
+# permitted.
+# =============================================================================
+
+regulations:
+  championship_name: "Synthetic Sprint Series (fictional)"
+  minimum_stint_laps: 5
+  maximum_stint_laps: null           # no regulatory cap (planning cap still applies)
+  mandatory_pit_stops: 1
+  maximum_pit_stops: null
+  minimum_distinct_dry_compounds: 2  # must use >= 2 different dry compounds in a dry race
+  wet_running_waives_compound_rule: true
+  permitted_compounds: [SOFT, MEDIUM, HARD, INTERMEDIATE, WET]
+  refuelling_allowed: false
+  fuel_capacity_kg: 115.0
+  refuel_rate_kg_per_s: null
+  refuel_concurrent_with_tyres: true
+  driver_rules: []                   # single-driver sprint: explicitly no driver-time rules
+  notes: "Fictional rule set for demonstration."
