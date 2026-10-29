@@ -18,6 +18,7 @@ simulation to put numbers on the risk.
 1. [Features](#features)
 2. [Architecture](#architecture)
 2a. [v2: predictive strategy and race adaptation](#v2-predictive-strategy-and-race-adaptation)
+2b. [ACC live telemetry (optional)](#acc-live-telemetry-optional)
 3. [Installation](#installation)
 4. [Quick start](#quick-start)
 5. [Command-line usage](#command-line-usage)
@@ -92,10 +93,13 @@ race-strategy-and-pit-window-risk/
 │   ├── replanning.py          v2: rolling-horizon decision engine + rolling race driver
 │   ├── decision_log.py        v2: structured decision records and export
 │   ├── uncertainty.py         v2: confidence intervals, convergence, tail stability, source breakdown
+│   ├── integrations/acc/      optional read-only ACC telemetry: protocol, parser, client, bridge, receiver, health, logger
 │   ├── reporting.py           HTML report and CSV summaries
 │   └── plotting.py            Plotly figures
 ├── dashboard/                 one module per dashboard section (A-H) + shared state/caching
 ├── docs/V2_AUDIT.md           repository audit made before the v2 changes
+├── docs/ACC_LIVE_TELEMETRY_SETUP.md   Windows + macOS setup for live ACC telemetry
+├── pages/1_ACC_Live_Telemetry.py      Streamlit page for the live ACC receiver
 ├── scripts/                   generate_demo_data.py, run_simulation.py, replan_race.py, validate_model.py
 ├── tests/                     pytest suite
 └── outputs/                   generated CSV and HTML (git-ignored)
@@ -256,6 +260,43 @@ overtaking prediction, and all thresholds are configurable under `traffic:` and
 * **Model uncertainty** is reported separately and explicitly: more simulations
   do not make predictions accurate for a real race.
 * `RiskReport` gains optional CI fields. They are filled only when computed.
+
+## ACC live telemetry (optional)
+
+Phase 1 adds a **read-only** connection from Assetto Corsa Competizione on a
+Windows PC to RaceSim on a Mac. It covers connecting, validating, monitoring
+health and logging. It does **not** feed the strategy engine, and RaceSim works
+exactly as before without ACC.
+
+* **Windows bridge** (`scripts/acc_windows_bridge.py`): registers with ACC's
+  UDP broadcasting API (protocol v4, connection password, empty command
+  password). It receives session, timing, position and event messages on
+  localhost, normalises them to RaceSim's telemetry schema 1.0 (every field
+  records its native source; derived fields are marked), and forwards signed
+  JSON (HMAC-SHA256) to the Mac with sequence numbers and heartbeats. Its only
+  dependencies are pydantic and PyYAML (`requirements-acc-bridge.txt`).
+* **Mac receiver** (`scripts/acc_mac_receiver.py`, or the dashboard page *ACC
+  Live Telemetry*):
+  * validates size, JSON, schema version, HMAC and payload;
+  * detects duplicate, out-of-order and missing packets;
+  * reports receiver, bridge, ACC and telemetry-freshness health separately
+    (`WAITING_FOR_DATA`, `CONNECTED`, `STALE`, `DISCONNECTED`, `ERROR`);
+  * writes one JSON Lines log per run to `outputs/acc_sessions/`.
+* **Mock mode** (`scripts/send_mock_acc_telemetry.py`): deterministic data,
+  always labelled MOCK, for testing without the game.
+* **Protocol sources:** cross-checked against
+  [bradfier/acbc](https://github.com/bradfier/acbc) (AGPL-3.0; facts only, no
+  code copied) and
+  [geniusdex/broawp](https://pkg.go.dev/github.com/geniusdex/broawp/accbroadcast)
+  (BSD-3-Clause). The reference is the C# SDK shipped in the game's
+  `sdk\broadcasting` folder. The track-data request layout and the meaning of
+  `sessionEndTime` are unverified, and documented as such.
+* **Limits:** the UDP broadcasting API has no physics channels (fuel, tyres,
+  pedals). Live operation has **not** been verified against a running game yet;
+  the tests use hand-built protocol fixtures and a fake ACC endpoint.
+
+Setup, the network checklist and the first-session test are in
+[docs/ACC_LIVE_TELEMETRY_SETUP.md](docs/ACC_LIVE_TELEMETRY_SETUP.md).
 
 ## Installation
 
@@ -605,7 +646,8 @@ With coverage:
 pytest --cov=racesim --cov-report=term
 ```
 
-The suite has 156 tests: the 110 from v1, unchanged, plus 46 for v2. The v1 tests It covers configuration validation, data loading and
+The suite has 199 tests: the 110 from v1, unchanged, 46 for v2 and 43 for the
+ACC integration (`tests/integrations/acc/`). The v1 tests It covers configuration validation, data loading and
 validation, tyre/fuel/pit models, the pit window (with a hand-calculated optimum
 that is not the midpoint), strategy generation limits, the optimiser
 (known-optimum case, agreement with the simulator), race-simulation time

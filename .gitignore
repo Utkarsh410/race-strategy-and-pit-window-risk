@@ -12,3 +12,6 @@ data/processed/*
 !data/processed/.gitkeep
 .DS_Store
 .streamlit/secrets.toml
+# ACC integration: local config (may contain IP addresses) and session logs
+config/acc_bridge.yaml
+outputs/acc_sessions/

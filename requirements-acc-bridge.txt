@@ -1,0 +1,4 @@
+# Minimal dependencies for the Windows ACC bridge (scripts/acc_windows_bridge.py).
+# The bridge does not need RaceSim's numerical stack (numpy/pandas/scipy/streamlit).
+pydantic>=2.5
+PyYAML>=6.0

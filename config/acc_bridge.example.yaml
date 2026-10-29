@@ -1,0 +1,53 @@
+# =============================================================================
+# RaceSim <-> Assetto Corsa Competizione telemetry bridge - EXAMPLE configuration
+# =============================================================================
+# Copy to config/acc_bridge.yaml (git-ignored) and edit. Contains NO secrets:
+# passwords and the shared secret are read from environment variables whose
+# NAMES are given here. The loader rejects secrets placed in this file.
+#
+# Two different ports:
+#   acc_bridge.native_broadcast_port  ACC's own broadcasting listener on the Windows PC
+#                                     (= "updListenerPort" in ACC's broadcasting.json).
+#   mac_receiver.port / acc_bridge.target_port
+#                                     RaceSim's forwarding port, Windows -> Mac (must match).
+# =============================================================================
+
+acc_bridge:
+  acc_host: 127.0.0.1                 # ACC runs on the same Windows PC as the bridge
+  native_broadcast_port: 9000         # must equal updListenerPort in broadcasting.json
+  connection_password_env: ACC_CONNECTION_PASSWORD   # env var holding broadcasting.json "connectionPassword"
+  display_name: RaceSim bridge
+  realtime_update_interval_ms: 250    # how often ACC sends realtime updates to this client
+  registration_timeout_s: 5.0
+  connection_timeout_s: 10.0          # re-register if ACC is silent this long
+  retry_interval_s: 3.0
+  request_track_data: true            # track-data request layout is UNVERIFIED; set false if ACC misbehaves
+  target_host: 192.0.2.10             # PLACEHOLDER (documentation address) - set the Mac's Wi-Fi IPv4 address
+  target_port: 9100
+  shared_secret_env: RACESIM_BRIDGE_SECRET
+  sender_id: windows-acc-bridge
+  forward_min_interval_s: 0.25
+  heartbeat_interval_s: 1.0
+  status_interval_s: 10.0
+  car_index: null                     # null = follow ACC's focused car
+  include_driver_names: false         # privacy: driver names are not forwarded unless enabled
+
+mac_receiver:
+  host: 127.0.0.1                     # loopback by default; set 0.0.0.0 or the Mac's Wi-Fi IP to receive from Windows
+  port: 9100
+  shared_secret_env: RACESIM_BRIDGE_SECRET
+  require_authentication: true
+  max_datagram_bytes: 8192
+  allowed_sender_ips: []              # optionally restrict to the Windows PC's IPv4 address
+  history_size: 500
+
+health:
+  stale_after_seconds: 3.0
+  disconnect_after_seconds: 10.0
+
+logging:
+  level: INFO
+  output_directory: outputs/acc_sessions
+  session_logging: true
+  flush_every_records: 20
+  flush_interval_seconds: 2.0
