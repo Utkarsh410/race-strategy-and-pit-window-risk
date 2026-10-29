@@ -101,6 +101,7 @@ def calculate_strategy_risk_report(
     finishing_positions: Optional[Sequence[float]] = None,
     min_tail_samples: int = 50,
     tie_tolerance_s: float = 1e-6,
+    precision: bool = True,
 ) -> RiskReport:
     """Complete risk report for one strategy.
 
@@ -130,7 +131,19 @@ def calculate_strategy_risk_report(
                 p_rival = float(ahead_all.mean())
         else:
             p_rival = calculate_probability_of_beating_rival(own, rival_finish_s, tie_tolerance_s=tie_tolerance_s)
+    prec: dict = {}
+    if precision and a.size > 1:
+        from racesim.uncertainty import bootstrap_interval, mean_confidence_interval, wilson_interval
+
+        m, se, hw = mean_confidence_interval(a)
+        _, clo, chi = bootstrap_interval(a, n_boot=200, seed=0)
+        prec = {"monte_carlo_standard_error_s": se, "mean_race_time_ci95_s": (m - hw, m + hw), "cvar_95_ci95_s": (clo, chi)}
+        if p_base is not None:
+            prec["probability_of_beating_baseline_ci95"] = wilson_interval(p_base, a.size)
+        if p_rival is not None:
+            prec["probability_of_beating_rival_ci95"] = wilson_interval(p_rival, a.size)
     return RiskReport(
+        **prec,
         strategy_id=strategy_id,
         expected_race_time_s=float(a.mean()),
         median_race_time_s=float(np.median(a)),

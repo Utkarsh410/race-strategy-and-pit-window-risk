@@ -63,12 +63,28 @@ def _set_lap_std(setup: SimulatorSetup, value: float) -> SimulatorSetup:
     return with_overrides(setup, race={"baseline_lap_time_std_s": value})
 
 
+def _scale_deg_uncertainty(setup: SimulatorSetup, m: float) -> SimulatorSetup:
+    comp = {name: {"degradation_uncertainty": c.degradation_uncertainty * m} for name, c in setup.compounds.items()}
+    return with_overrides(setup, compounds=comp)
+
+
+def _set_pit_std(setup: SimulatorSetup, value: float) -> SimulatorSetup:
+    return with_overrides(setup, race={"pit_loss_std_s": value})
+
+
 PARAMETERS: dict[str, tuple[Callable[[SimulatorSetup, float], SimulatorSetup], str, Callable[[SimulatorSetup], float]]] = {
     "tyre_degradation_multiplier": (_scale_degradation, "x", lambda s: 1.0),
     "pit_lane_loss_s": (_set_pit_loss, "s", lambda s: s.race.pit_lane_loss_s),
     "safety_car_probability_per_lap": (_set_sc, "per lap", lambda s: s.race.safety_car_probability_per_lap),
     "baseline_lap_time_std_s": (_set_lap_std, "s", lambda s: s.race.baseline_lap_time_std_s),
+    "degradation_uncertainty_scale": (_scale_deg_uncertainty, "x", lambda s: 1.0),
+    "pit_loss_std_s": (_set_pit_std, "s", lambda s: s.race.pit_loss_std_s),
 }
+
+# Parameters that only change random variation: the deterministic recommendation cannot change,
+# so they are evaluated through Monte Carlo metrics.
+UNCERTAINTY_PARAMETERS = ("safety_car_probability_per_lap", "baseline_lap_time_std_s", "degradation_uncertainty_scale",
+                          "pit_loss_std_s")
 
 
 def _baseline(setup: SimulatorSetup) -> Optional[Strategy]:
@@ -172,3 +188,32 @@ def rank_sensitive_parameters(results: Sequence[SensitivityResult]) -> pd.DataFr
         return df
     return df.sort_values(["recommendation_changes", "distinct_recommendations", "first_pit_lap_range_laps"],
                           ascending=False).reset_index(drop=True)
+
+
+def vary_uncertain_parameters(setup: SimulatorSetup, strategy: Strategy, baseline: Strategy, *, n_sims: int = 500,
+                              seed: Optional[int] = None,
+                              ranges: Optional[dict[str, Sequence[float]]] = None) -> pd.DataFrame:
+    """Sensitivity of risk metrics to the *size* of each uncertainty source.
+
+    For each parameter value the same two strategies are compared under common
+    random numbers. Columns: P(beat baseline), mean paired difference, CVaR95
+    of the strategy and the CVaR difference to the baseline.
+    """
+    from racesim.uncertainty import paired_probability
+
+    ranges = ranges or {
+        "degradation_uncertainty_scale": (0.0, 1.0, 2.0, 3.0),
+        "pit_loss_std_s": (0.0, setup.race.pit_loss_std_s, 2 * setup.race.pit_loss_std_s, 4 * setup.race.pit_loss_std_s),
+        "safety_car_probability_per_lap": (0.0, setup.race.safety_car_probability_per_lap, 2 * setup.race.safety_car_probability_per_lap),
+        "baseline_lap_time_std_s": (0.0, setup.race.baseline_lap_time_std_s, 2 * setup.race.baseline_lap_time_std_s),
+    }
+    rows = []
+    for param, values in ranges.items():
+        apply, unit, _ = PARAMETERS[param]
+        for v in values:
+            mc = run_monte_carlo(apply(setup, float(v)), [strategy, baseline], n_sims=n_sims, seed=seed)
+            a, b = mc.race_times[strategy.strategy_id], mc.race_times[baseline.strategy_id]
+            rows.append({"parameter": param, "unit": unit, "value": float(v), "p_beat_baseline": paired_probability(a, b),
+                         "mean_paired_delta_s": float((a - b).mean()), "cvar95_s": calculate_cvar(a),
+                         "cvar95_delta_vs_baseline_s": calculate_cvar(a) - calculate_cvar(b)})
+    return pd.DataFrame(rows)

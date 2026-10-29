@@ -192,7 +192,9 @@
       "traffic_mean_loss_s": 0.6,
       "dirty_air_threshold_s": 1.0,
       "dirty_air_loss_s_per_lap": 0.4,
-      "overtake_pace_delta_s": 0.8
+      "overtake_pace_delta_s": 0.8,
+      "traffic_exposure_laps": 5,
+      "rejoin_traffic_window_s": 2.0
     },
     "rivals": [
       {
@@ -242,7 +244,25 @@
       "reactive_strategy": true,
       "baseline_pace_uncertainty_s": 0.15,
       "fuel_consumption_uncertainty": 0.02,
-      "tail_warning_min_samples": 50
+      "tail_warning_min_samples": 50,
+      "include_rival_uncertainty": false,
+      "rival_pace_uncertainty_s": 0.15,
+      "rival_pit_lap_jitter_laps": 2
+    },
+    "replanning": {
+      "monte_carlo_simulations": 200,
+      "risk_aversion": 0.0,
+      "pit_lap_horizon_laps": 12,
+      "include_rivals": true,
+      "replan_every_laps": 5,
+      "replan_within_laps_of_stop": 2,
+      "elapsed_deviation_threshold_s": 2.0,
+      "gap_deviation_threshold_s": 1.5,
+      "fuel_deviation_threshold_kg": 1.0,
+      "wetness_change_threshold": 0.1,
+      "rival_pace_update_weight": 0.5,
+      "rival_overdue_stop_laps": 2,
+      "plan_change_threshold_s": 0.5
     },
     "regulations": {
       "championship_name": "Synthetic Sprint Series (fictional)",

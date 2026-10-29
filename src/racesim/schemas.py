@@ -269,6 +269,8 @@ class TrafficConfig(_Frozen):
     overtake_pace_delta_s: float = Field(
         default=0.8, ge=0, description="Pace advantage needed to pass a car on track (s/lap)."
     )
+    traffic_exposure_laps: int = Field(default=5, ge=1, description="Laps after a pit exit checked for traffic exposure.")
+    rejoin_traffic_window_s: float = Field(default=2.0, ge=0, description="Cars within this gap after a rejoin count as traffic (s).")
 
 
 class RivalConfig(_Frozen):
@@ -308,6 +310,36 @@ class MonteCarloConfig(_Frozen):
     baseline_pace_uncertainty_s: float = Field(default=0.15, ge=0, description="Std. dev. of race pace bias (s/lap).")
     fuel_consumption_uncertainty: float = Field(default=0.02, ge=0, le=1, description="Relative std. dev.")
     tail_warning_min_samples: int = Field(default=50, ge=1)
+    include_rival_uncertainty: bool = Field(
+        default=False, description="Rival behaviour uncertainty (off by default so v1 results are unchanged)."
+    )
+    rival_pace_uncertainty_s: float = Field(default=0.15, ge=0, description="Std. dev. of each rival's race-pace offset (s/lap).")
+    rival_pit_lap_jitter_laps: int = Field(default=2, ge=0, description="Rival stops shift uniformly by +/- this many laps.")
+
+
+class ReplanningConfig(_Frozen):
+    """Rolling-horizon decision engine settings (see :mod:`racesim.replanning`).
+
+    Thresholds decide when a new observation is different enough from the
+    previous prediction to justify re-optimising; otherwise the previous plan
+    is carried forward unchanged (a no-op).
+    """
+
+    monte_carlo_simulations: int = Field(default=200, ge=0, le=20_000, description="0 = deterministic comparison only.")
+    risk_aversion: float = Field(default=0.0, ge=0, le=1, description="score = mean + lambda * (CVaR95 - mean).")
+    pit_lap_horizon_laps: int = Field(default=12, ge=1, description="Next-pit-lap alternatives evaluated ahead of the current lap.")
+    include_rivals: bool = True
+    replan_every_laps: int = Field(default=5, ge=1)
+    replan_within_laps_of_stop: int = Field(default=2, ge=0)
+    elapsed_deviation_threshold_s: float = Field(default=2.0, ge=0)
+    gap_deviation_threshold_s: float = Field(default=1.5, ge=0)
+    fuel_deviation_threshold_kg: float = Field(default=1.0, ge=0)
+    wetness_change_threshold: float = Field(default=0.1, ge=0, le=1)
+    rival_pace_update_weight: float = Field(default=0.5, ge=0, le=1, description="Weight on newly observed rival pace.")
+    rival_overdue_stop_laps: int = Field(default=2, ge=1, description="Assumed laps until an overdue rival stop.")
+    plan_change_threshold_s: float = Field(
+        default=0.5, ge=0, description="Keep the current plan unless an alternative scores better by more than this (s)."
+    )
 
 
 class DriverRule(_Frozen):
@@ -627,4 +659,10 @@ class RiskReport(BaseModel):
     probability_of_beating_rival: Optional[float] = None
     expected_finishing_position: Optional[float] = None
     number_of_simulations: int
+    # Simulation precision (Monte Carlo error only; says nothing about model accuracy)
+    monte_carlo_standard_error_s: Optional[float] = None
+    mean_race_time_ci95_s: Optional[tuple[float, float]] = None
+    cvar_95_ci95_s: Optional[tuple[float, float]] = None
+    probability_of_beating_baseline_ci95: Optional[tuple[float, float]] = None
+    probability_of_beating_rival_ci95: Optional[tuple[float, float]] = None
     warnings: list[str] = Field(default_factory=list)

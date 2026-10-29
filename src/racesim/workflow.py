@@ -98,6 +98,9 @@ def monte_carlo_sc_conditioning(mc: MonteCarloResult) -> pd.DataFrame:
 
 @dataclass
 class AnalysisBundle:
+    """Everything a report can show. ``analyses_run`` lists what was actually executed;
+    sections for anything else are labelled as not run."""
+
     setup: SimulatorSetup
     optimisation: OptimisationResult
     pit_window: PitWindowResult
@@ -112,6 +115,132 @@ class AnalysisBundle:
     sensitivity_ranking: Optional[pd.DataFrame] = None
     warnings: list[str] = field(default_factory=list)
     data_provenance: dict = field(default_factory=dict)
+    # v2 additions
+    precision: Optional[pd.DataFrame] = None
+    convergence: Optional[pd.DataFrame] = None
+    convergence_summary: Optional[dict] = None
+    tail_stability: dict = field(default_factory=dict)
+    uncertainty_breakdown: Optional[pd.DataFrame] = None
+    rolling_race: Optional[object] = None          # replanning.RollingRaceResult
+    validation: Optional[object] = None            # validation.ModelValidationResult
+    model_uncertainty: list[str] = field(default_factory=list)
+    analyses_run: list[str] = field(default_factory=list)
+
+    @property
+    def decision_log(self):
+        return None if self.rolling_race is None else self.rolling_race.decision_log
+
+
+def run_sensitivity_suite(setup: SimulatorSetup, *, sensitivity_sims: int = 300, seed: Optional[int] = None) -> list[SensitivityResult]:
+    """The standard set of sensitivity sweeps used by the CLI, report and dashboard."""
+    return [
+        vary_tyre_degradation(setup),
+        vary_pit_loss(setup),
+        vary_safety_car_probability(setup, n_sims=sensitivity_sims, seed=seed),
+        vary_lap_time_variability(setup, n_sims=sensitivity_sims, seed=seed),
+    ]
+
+
+def default_replan_events(setup: SimulatorSetup, *, sc_lap: Optional[int] = None, sc_laps: int = 4,
+                          rain_lap: Optional[int] = None, rain_laps: int = 12, rain_severity: float = 0.8) -> list[RaceEvent]:
+    """Manual events for a rolling-horizon demonstration."""
+    ev: list[RaceEvent] = []
+    n = setup.race.total_laps
+    if sc_lap:
+        ev.append(RaceEvent(event_type=EventType.SAFETY_CAR, start_lap=sc_lap, duration_laps=min(sc_laps, n - sc_lap + 1)))
+    if rain_lap:
+        ev.append(RaceEvent(event_type=EventType.RAIN, start_lap=rain_lap, duration_laps=min(rain_laps, n - rain_lap + 1),
+                            severity=rain_severity))
+    return ev
+
+
+def run_replanning_demo(setup: SimulatorSetup, *, strategy: Optional[Strategy] = None, events: Optional[Sequence[RaceEvent]] = None,
+                        n_sims: Optional[int] = None, risk_aversion: Optional[float] = None, seed: Optional[int] = None,
+                        truth_rivals=None):
+    """Deterministic rolling-horizon race starting from ``strategy`` (default: the baseline plan)."""
+    from racesim.replanning import ReplanningEngine, run_rolling_race
+
+    strategy = strategy or baseline_strategy(setup) or find_optimal_strategy(setup).best.strategy
+    engine = ReplanningEngine(setup, n_sims=n_sims, risk_aversion=risk_aversion, seed=seed)
+    return run_rolling_race(setup, strategy, events=events, engine=engine, truth_rivals=truth_rivals)
+
+
+def compute_uncertainty_diagnostics(bundle: "AnalysisBundle") -> None:
+    """Simulation-precision diagnostics for the recommended strategy (in place)."""
+    from racesim.uncertainty import (assess_tail_stability, convergence_diagnostics, convergence_summary,
+                                     simulation_precision_table)
+
+    mc = bundle.monte_carlo
+    if mc is None:
+        return
+    base = baseline_strategy(bundle.setup)
+    base_id = base.strategy_id if base is not None and base.strategy_id in mc.race_times else None
+    rec = bundle.optimisation.best.strategy.strategy_id
+    bundle.precision = simulation_precision_table(mc, base_id)
+    if rec in mc.race_times:
+        bundle.convergence = convergence_diagnostics(mc.race_times[rec], mc.race_times[base_id] if base_id and base_id != rec else None)
+        bundle.convergence_summary = convergence_summary(bundle.convergence)
+    bundle.tail_stability = {sid: assess_tail_stability(t, n_boot=200) for sid, t in mc.race_times.items()}
+    if "uncertainty diagnostics" not in bundle.analyses_run:
+        bundle.analyses_run.append("uncertainty diagnostics")
+
+
+def assemble_bundle(
+    setup: SimulatorSetup,
+    *,
+    optimisation: Optional[OptimisationResult] = None,
+    monte_carlo: Optional[MonteCarloResult] = None,
+    sensitivity: Optional[list[SensitivityResult]] = None,
+    rolling_race=None,
+    validation=None,
+    uncertainty_breakdown: Optional[pd.DataFrame] = None,
+    data_provenance: Optional[dict] = None,
+) -> AnalysisBundle:
+    """Build a report bundle from analyses that have already been run (no hidden recomputation
+    of Monte Carlo, sensitivity, replanning or validation)."""
+    opt = optimisation or find_optimal_strategy(setup)
+    if opt.best is None:
+        raise RuntimeError("no feasible strategy satisfies the configured constraints")
+    k = max(opt.best.number_of_stops, 1)
+    window = calculate_pit_window(setup, n_stops=[k])
+    rec_sim = simulate_race(setup, opt.best.strategy, rivals=setup.rivals or None)
+    short = shortlist_strategies(opt, setup)
+    sc = safety_car_scenario_table(setup, short)
+    bundle = AnalysisBundle(setup, opt, window, rec_sim, short, sc, warnings=list(regulation_warnings(setup)),
+                            data_provenance=data_provenance or {"source": "configuration only (SYNTHETIC parameters)"},
+                            analyses_run=["deterministic optimisation", "pit window", "safety-car scenarios"])
+    if monte_carlo is not None:
+        base = baseline_strategy(setup)
+        bundle.monte_carlo = monte_carlo
+        bundle.risk_reports = risk_reports_from_monte_carlo(monte_carlo, baseline_id=base.strategy_id if base else None)
+        names = {sid: st.strategy_name for sid, st in monte_carlo.strategies.items()}
+        bundle.objectives = compare_objectives(bundle.risk_reports, names)
+        bundle.sc_conditioning = monte_carlo_sc_conditioning(monte_carlo)
+        for r in bundle.risk_reports.values():
+            bundle.warnings += [w for w in r.warnings if w not in bundle.warnings]
+        bundle.analyses_run.append("Monte Carlo")
+        compute_uncertainty_diagnostics(bundle)
+    if sensitivity:
+        bundle.sensitivity = list(sensitivity)
+        bundle.sensitivity_ranking = rank_sensitive_parameters(bundle.sensitivity)
+        bundle.analyses_run.append("sensitivity")
+    if uncertainty_breakdown is not None:
+        bundle.uncertainty_breakdown = uncertainty_breakdown
+        bundle.analyses_run.append("uncertainty breakdown")
+    if rolling_race is not None:
+        bundle.rolling_race = rolling_race
+        bundle.analyses_run.append("dynamic replanning")
+    if validation is not None:
+        bundle.validation = validation
+        bundle.analyses_run.append("model validation")
+    from racesim.uncertainty import model_uncertainty_summary
+
+    vstat = None
+    if validation is not None:
+        vstat = f"{validation.status} ({validation.evidence_type})"
+    bundle.model_uncertainty = model_uncertainty_summary(setup, sensitivity_ranking=bundle.sensitivity_ranking,
+                                                         validation_status=vstat, breakdown=uncertainty_breakdown)
+    return bundle
 
 
 def run_full_analysis(
@@ -124,38 +253,46 @@ def run_full_analysis(
     sensitivity_sims: int = 300,
     data_provenance: Optional[dict] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
+    replan_events: Optional[Sequence[RaceEvent]] = None,
+    run_replanning: bool = False,
+    replan_sims: Optional[int] = None,
+    risk_aversion: Optional[float] = None,
+    validation_data: Optional[pd.DataFrame] = None,
+    run_breakdown: bool = False,
+    breakdown_sims: int = 1000,
 ) -> AnalysisBundle:
-    """Optimise, compute the pit window, simulate scenarios and quantify risk."""
-    warnings = regulation_warnings(setup)
+    """Optimise, compute the pit window, simulate scenarios and quantify risk.
+
+    Optional v2 analyses: rolling-horizon replanning (``run_replanning``),
+    model validation on ``validation_data`` and an uncertainty-source
+    breakdown (``run_breakdown``).
+    """
     opt = find_optimal_strategy(setup)
     if opt.best is None:
         raise RuntimeError("no feasible strategy satisfies the configured constraints")
-    k = max(opt.best.number_of_stops, 1)
-    window = calculate_pit_window(setup, n_stops=[k])
-    rec_sim = simulate_race(setup, opt.best.strategy, rivals=setup.rivals or None)
-    short = shortlist_strategies(opt, setup)
-    sc = safety_car_scenario_table(setup, short)
-    bundle = AnalysisBundle(setup, opt, window, rec_sim, short, sc, warnings=warnings,
-                            data_provenance=data_provenance or {"source": "configuration only (SYNTHETIC parameters)"})
+    mc = None
     if n_sims != 0:
+        short = shortlist_strategies(opt, setup)
         mc = run_monte_carlo(setup, short, n_sims=n_sims, seed=seed, include_rivals=include_rivals and bool(setup.rivals),
                              progress_callback=progress_callback)
+    sens = run_sensitivity_suite(setup, sensitivity_sims=sensitivity_sims, seed=seed) if run_sensitivity else None
+    rolling = None
+    if run_replanning:
+        rolling = run_replanning_demo(setup, events=replan_events, n_sims=replan_sims, risk_aversion=risk_aversion, seed=seed)
+    val = None
+    if validation_data is not None:
+        from racesim.validation import run_model_validation
+
+        val = run_model_validation(validation_data, setup, provenance=data_provenance)
+    breakdown = None
+    if run_breakdown:
+        from racesim.uncertainty import uncertainty_breakdown as _breakdown
+
         base = baseline_strategy(setup)
-        bundle.monte_carlo = mc
-        bundle.risk_reports = risk_reports_from_monte_carlo(mc, baseline_id=base.strategy_id if base else None)
-        bundle.objectives = compare_objectives(bundle.risk_reports, {sid: s.strategy_name for sid, s in mc.strategies.items()})
-        bundle.sc_conditioning = monte_carlo_sc_conditioning(mc)
-        for r in bundle.risk_reports.values():
-            bundle.warnings += [w for w in r.warnings if w not in bundle.warnings]
-    if run_sensitivity:
-        bundle.sensitivity = [
-            vary_tyre_degradation(setup),
-            vary_pit_loss(setup),
-            vary_safety_car_probability(setup, n_sims=sensitivity_sims, seed=seed),
-            vary_lap_time_variability(setup, n_sims=sensitivity_sims, seed=seed),
-        ]
-        bundle.sensitivity_ranking = rank_sensitive_parameters(bundle.sensitivity)
-    return bundle
+        breakdown = _breakdown(setup, opt.best.strategy, base, n_sims=breakdown_sims, seed=seed,
+                               include_rivals=include_rivals and bool(setup.rivals))
+    return assemble_bundle(setup, optimisation=opt, monte_carlo=mc, sensitivity=sens, rolling_race=rolling, validation=val,
+                           uncertainty_breakdown=breakdown, data_provenance=data_provenance)
 
 
 def paired_deltas(mc: MonteCarloResult, baseline_id: str) -> dict[str, np.ndarray]:

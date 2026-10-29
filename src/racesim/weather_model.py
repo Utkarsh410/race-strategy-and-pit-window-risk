@@ -165,3 +165,35 @@ def estimate_wet_tyre_suitability(
         for r in rows[-len(reference_lap_times_s):]:
             r["best_compound"] = best_name
     return pd.DataFrame(rows)
+
+
+def project_conditions(
+    cfg: WeatherConfig,
+    n_laps: int,
+    from_lap: int,
+    *,
+    wetness: float,
+    track_temperature_c: float,
+    rain_laps_remaining: int = 0,
+    peak_wetness: Optional[float] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project track temperature and wetness from an *observed* state.
+
+    Laps before ``from_lap`` hold the observed values (they are already run
+    and are never re-simulated). Rain is assumed to continue for
+    ``rain_laps_remaining`` laps, after which the track dries at the configured
+    rate. Returns ``(temperature, wetness)`` arrays of length ``n_laps``.
+    """
+    temp = np.full(n_laps, float(track_temperature_c))
+    wet = np.full(n_laps, float(wetness) if cfg.wet_weather_enabled else 0.0)
+    if not cfg.wet_weather_enabled:
+        rain_laps_remaining = 0
+    peak = max(cfg.peak_wetness if peak_wetness is None else peak_wetness, float(wetness))
+    t, w = float(track_temperature_c), wet[0]
+    rate = _temperature_rate(cfg)
+    for k, lap in enumerate(range(from_lap, n_laps + 1)):
+        raining = k < rain_laps_remaining
+        t, _ = update_track_conditions(t, w, raining, cfg, temperature_change_c_per_lap=rate)
+        _, w = update_track_conditions(t, w, raining, cfg, peak_wetness=peak)
+        temp[lap - 1], wet[lap - 1] = float(t), float(w)
+    return temp, wet

@@ -195,6 +195,23 @@ monte_carlo:
   fuel_consumption_uncertainty: 0.02
   tail_warning_min_samples: 50
 
+# Rolling-horizon replanning (racesim.replanning). Thresholds decide when an
+# observation differs enough from the last prediction to re-optimise.
+replanning:
+  monte_carlo_simulations: 200     # per candidate per decision; 0 = deterministic only
+  risk_aversion: 0.0               # score = mean + risk_aversion * (CVaR95 - mean)
+  pit_lap_horizon_laps: 12
+  include_rivals: true
+  replan_every_laps: 5
+  replan_within_laps_of_stop: 2
+  elapsed_deviation_threshold_s: 2.0
+  gap_deviation_threshold_s: 1.5
+  fuel_deviation_threshold_kg: 1.0
+  wetness_change_threshold: 0.1
+  rival_pace_update_weight: 0.5
+  rival_overdue_stop_laps: 2
+  plan_change_threshold_s: 0.5     # hysteresis: avoid flip-flopping between near-equal plans
+
 # Reference plan for "probability of beating the baseline".
 baseline_strategy:
   pit_laps: [26]

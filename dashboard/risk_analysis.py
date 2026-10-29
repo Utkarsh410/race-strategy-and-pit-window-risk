@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 import streamlit as st
 
-from dashboard.common import DashboardContext, base_setup, cached_optimisation, cached_pit_window, cached_sc_table, json_key, show, ss, to_csv_bytes
+from dashboard.common import DashboardContext, base_setup, build_report_html, cached_optimisation, json_key, show, ss, to_csv_bytes
 from racesim.monte_carlo import run_monte_carlo
 from racesim.plotting import plot_cumulative_distribution, plot_delta_distribution, plot_monte_carlo_distribution
-from racesim.race_simulator import simulate_race
-from racesim.reporting import generate_strategy_report
 from racesim.risk_metrics import compare_objectives, risk_reports_from_monte_carlo
-from racesim.schemas import EventType, RaceSnapshot
-from racesim.workflow import AnalysisBundle, baseline_strategy, monte_carlo_sc_conditioning, paired_deltas, shortlist_strategies
+from racesim.workflow import baseline_strategy, monte_carlo_sc_conditioning, paired_deltas, shortlist_strategies
 
 LOW_COUNT = 1000
 
@@ -41,7 +36,7 @@ def _controls(ctx: DashboardContext) -> dict:
     ss("ov_vsc_prob", base.race.vsc_probability_per_lap)
     c[3].number_input("VSC probability per lap", 0.0, 0.2, step=0.002, format="%.3f", key="ov_vsc_prob")
     with st.expander("Uncertainty sources"):
-        cc = st.columns(6)
+        cc = st.columns(7)
         flags = {
             "parameter": cc[0].checkbox("Parameter", True, help="Degradation, pace bias, fuel-consumption draws per run."),
             "lap_variability": cc[1].checkbox("Lap-to-lap", True),
@@ -49,6 +44,8 @@ def _controls(ctx: DashboardContext) -> dict:
             "pit_variability": cc[3].checkbox("Pit execution", True),
             "traffic": cc[4].checkbox("Traffic", True),
             "reactive": cc[5].checkbox("Reactive calls", True, help="Strategy uncertainty: SC pit calls and rain tyre calls."),
+            "rival_behaviour": cc[6].checkbox("Rival behaviour", ctx.setup.monte_carlo.include_rival_uncertainty,
+                                              help="Random rival pace offset and pit-lap shifts (affects rival outcomes only)."),
         }
     include_rivals = st.checkbox("Simulate configured rivals (enables P(beat rival) and finishing position)", value=bool(ctx.setup.rivals),
                                  disabled=not ctx.setup.rivals)
@@ -74,7 +71,7 @@ def render(ctx: DashboardContext) -> None:
         mc = run_monte_carlo(ctx.setup, short, n_sims=params["n_sims"], seed=params["seed"], flags=params["flags"],
                              include_rivals=params["include_rivals"], progress_callback=lambda f, m: bar.progress(min(f, 1.0), text=m))
         bar.empty()
-        st.session_state["mc_store"] = stored = {"key": key, "mc": mc}
+        st.session_state["mc_store"] = stored = {"key": key, "mc": mc, "setup": ctx.setup_json}
     if stored is None:
         st.info("Press **Run Monte Carlo** to simulate. Simulations are not re-run automatically on every change.")
         return
@@ -96,9 +93,14 @@ def render(ctx: DashboardContext) -> None:
     k = st.columns(4)
     k[0].metric("P05 / P50", f"{r.percentile_05_s:,.1f} / {r.percentile_50_s:,.1f} s")
     k[1].metric("P90 / P95", f"{r.percentile_90_s:,.1f} / {r.percentile_95_s:,.1f} s")
-    k[2].metric("P(beat baseline)", "n/a" if r.probability_of_beating_baseline is None else f"{r.probability_of_beating_baseline:.1%}",
-                help="Paired over identical simulated races; ties count 1/2.")
-    k[3].metric("P(beat all rivals)", "n/a (rivals not simulated)" if r.probability_of_beating_rival is None else f"{r.probability_of_beating_rival:.1%}")
+    ci = lambda t: "" if t is None else f" [{t[0]:.1%}, {t[1]:.1%}]"  # noqa: E731
+    k[2].metric("P(beat baseline) [95% CI]", "n/a" if r.probability_of_beating_baseline is None else
+                f"{r.probability_of_beating_baseline:.1%}{ci(r.probability_of_beating_baseline_ci95)}",
+                help="Paired over identical simulated races; ties count 1/2. Wilson interval = simulation precision only.")
+    k[3].metric("P(beat all rivals) [95% CI]", "n/a (rivals not simulated)" if r.probability_of_beating_rival is None else
+                f"{r.probability_of_beating_rival:.1%}{ci(r.probability_of_beating_rival_ci95)}")
+    st.caption(f"Monte Carlo standard error of the mean: {r.monte_carlo_standard_error_s:.2f} s. Confidence intervals describe "
+               "simulation precision, not real-world accuracy (see Section H).")
     for w in r.warnings:
         st.warning(w)
     st.caption("Absolute race-time spread is dominated by safety cars, which slow every strategy; "
@@ -132,18 +134,9 @@ def render(ctx: DashboardContext) -> None:
     d1.download_button("Risk metrics (CSV)", to_csv_bytes(table), "risk_metrics.csv", "text/csv")
     d2.download_button("Per-run results (CSV)", to_csv_bytes(mc.to_dataframe()), "monte_carlo_results.csv", "text/csv")
     if d3.button("Build HTML report"):
-        with st.spinner("Building report..."):
-            pw = cached_pit_window(ctx.setup_json, RaceSnapshot().model_dump_json(), (max(opt.best.number_of_stops, 1),))
-
-            sc = cached_sc_table(ctx.setup_json, json.dumps([s.model_dump(mode="json") for s in short]),
-                                 tuple(max(2, round(ctx.setup.race.total_laps * f)) for f in (0.15, 0.3, 0.45, 0.6, 0.75)), 4,
-                                 EventType.SAFETY_CAR.value)
-            bundle = AnalysisBundle(ctx.setup, opt, pw, simulate_race(ctx.setup, opt.best.strategy, rivals=ctx.setup.rivals or None),
-                                    short, sc, mc, reports, compare_objectives(reports, names), cond,
-                                    warnings=ctx.config_warnings,
-                                    data_provenance={"parameters": ctx.setup.race.data_label, "lap_data": ctx.data_label,
-                                                     "generated_from": "RaceSim dashboard",
-                                                     "sensitivity": "not run from dashboard (use scripts/run_simulation.py)"})
-            st.session_state["report_html"] = generate_strategy_report(bundle)
+        with st.spinner("Building report from the analyses run in this session..."):
+            st.session_state["report_html"] = build_report_html(ctx)
     if "report_html" in st.session_state:
         d3.download_button("Download HTML report", st.session_state["report_html"].encode("utf-8"), "race_strategy_report.html", "text/html")
+    st.caption("The report includes Monte Carlo (this tab), sensitivity and uncertainty breakdown (Section H), dynamic replanning "
+               "(Section G) and model validation (Section F) only if they have been run in this session.")

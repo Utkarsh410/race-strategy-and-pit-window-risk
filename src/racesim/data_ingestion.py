@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Union
+from typing import Any, Iterable, Optional, Union
 
 import pandas as pd
 
@@ -176,3 +176,32 @@ def export_strategy_comparison(results: Any, path: Union[str, Path]) -> Path:
     frame.to_csv(path, index=False)
     logger.info("Exported strategy comparison to %s", path)
     return path
+
+
+def load_historical_csv(path: Union[str, Path], *, source_label: Optional[str] = None, **kwargs: Any) -> tuple[IngestionResult, dict]:
+    """Load recorded lap data for validation, returning the ingestion result and provenance.
+
+    The ``data_source`` column is never invented: if the file lacks one, it is
+    set to ``source_label`` when the user supplies it, otherwise to
+    ``UNLABELLED`` (which validation treats as unverified provenance, not as
+    historical evidence). A SHA-256 digest of the file is recorded so results
+    can be traced to the exact input.
+    """
+    import hashlib
+
+    path = Path(path)
+    res = load_race_csv(path, **kwargs)
+    if "data_source" not in res.data.columns:
+        res.data["data_source"] = source_label or "UNLABELLED"
+    elif source_label:
+        logger.warning("data_source column present; ignoring source_label=%r", source_label)
+    provenance = {
+        "file": str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "rows": len(res.data),
+        "data_source_labels": sorted(res.data["data_source"].astype(str).unique().tolist()),
+        "drivers": int(res.data["driver"].nunique()) if "driver" in res.data.columns else None,
+        "validation_errors": len(res.report.errors),
+        "validation_warnings": len(res.report.warnings),
+    }
+    return res, provenance

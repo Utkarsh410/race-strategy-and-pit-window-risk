@@ -206,3 +206,24 @@ def cached_synthetic(setup_json: str, seed: int, anomalies: bool):
     from racesim.synthetic_data import generate_synthetic_race
 
     return generate_synthetic_race(setup_from_json(setup_json), seed=seed, inject_anomalies=anomalies)
+
+
+def build_report_html(ctx: DashboardContext) -> str:
+    """HTML report from the analyses actually run in this session (shared workflow, no recomputation of
+    Monte Carlo, sensitivity, replanning or validation)."""
+    from racesim.reporting import generate_strategy_report
+    from racesim.workflow import assemble_bundle
+
+    def current(key: str):
+        store = st.session_state.get(key)
+        return None if store is None or store.get("setup") != ctx.setup_json else store.get("result")
+
+    mc = st.session_state.get("mc_store", {}).get("mc") if st.session_state.get("mc_store", {}).get("setup") == ctx.setup_json else None
+    sens = current("sens_store")
+    bundle = assemble_bundle(
+        ctx.setup, optimisation=cached_optimisation(ctx.setup_json), monte_carlo=mc,
+        sensitivity=sens, rolling_race=current("replan_store"), validation=current("valid_store"),
+        uncertainty_breakdown=current("breakdown_store"),
+        data_provenance={"parameters": ctx.setup.race.data_label, "lap_data": ctx.data_label, "generated_from": "RaceSim dashboard"})
+    bundle.warnings = list(dict.fromkeys(bundle.warnings + ctx.config_warnings))
+    return generate_strategy_report(bundle)

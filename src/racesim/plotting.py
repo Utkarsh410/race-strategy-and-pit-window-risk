@@ -348,3 +348,62 @@ def plot_stint_pace(stints: pd.DataFrame, *, title: str = "Stint pace (median la
                                  customdata=g[["laps", "first_lap", "last_lap"]],
                                  hovertemplate="%{x}<br>%{y:.3f} s<br>%{customdata[0]} laps (L%{customdata[1]}-%{customdata[2]})<extra>%{fullData.name}</extra>"))
     return _layout(fig, title, "Stint", "Median lap time (s)")
+
+
+def plot_convergence(diag: pd.DataFrame, *, title: str = "Monte Carlo convergence (simulation precision only)") -> go.Figure:
+    """Running P(beat baseline) with its Wilson 95 % band, or the running mean if no baseline."""
+    if diag is None or diag.empty:
+        return empty_figure(title, "Run the Monte Carlo simulation to see convergence diagnostics.")
+    fig = go.Figure()
+    if "p_beat_baseline" in diag.columns:
+        fig.add_trace(go.Scatter(x=np.concatenate([diag["n"], diag["n"][::-1]]),
+                                 y=np.concatenate([diag["p_ci_high"], diag["p_ci_low"][::-1]]), fill="toself",
+                                 fillcolor="rgba(42,120,214,0.15)", line={"width": 0}, name="95% Wilson interval", hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=diag["n"], y=diag["p_beat_baseline"], mode="lines+markers", name="P(beat baseline)",
+                                 line={"width": 2, "color": SERIES[0]}, marker={"size": 8},
+                                 hovertemplate="n = %{x}<br>P = %{y:.3f}<extra></extra>"))
+        return _layout(fig, title, "Number of simulated races", "P(beat baseline)")
+    fig.add_trace(go.Scatter(x=np.concatenate([diag["n"], diag["n"][::-1]]),
+                             y=np.concatenate([diag["mean_ci_high_s"], diag["mean_ci_low_s"][::-1]]), fill="toself",
+                             fillcolor="rgba(42,120,214,0.15)", line={"width": 0}, name="95% CI", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=diag["n"], y=diag["mean_s"], mode="lines+markers", name="Running mean",
+                             line={"width": 2, "color": SERIES[0]}, marker={"size": 8}))
+    return _layout(fig, title, "Number of simulated races", "Mean race time (s)")
+
+
+def plot_uncertainty_breakdown(df: pd.DataFrame, *, title: str = "Spread by uncertainty source") -> go.Figure:
+    """Std. dev. of absolute race time and of the paired difference to the baseline, per source."""
+    if df is None or df.empty:
+        return empty_figure(title, "Uncertainty breakdown not run.")
+    fig = go.Figure()
+    fig.add_trace(go.Bar(y=df["source"], x=df["race_time_std_s"], orientation="h", name="Race time std (s)",
+                         marker={"color": SERIES[0], "line": {"width": 2, "color": SURFACE}}))
+    if "paired_delta_std_s" in df.columns:
+        fig.add_trace(go.Bar(y=df["source"], x=df["paired_delta_std_s"], orientation="h", name="Paired difference vs baseline std (s)",
+                             marker={"color": SERIES[1], "line": {"width": 2, "color": SURFACE}}))
+    fig.update_layout(barmode="group")
+    return _layout(fig, title, "Standard deviation (s)", "", height=max(320, 60 * len(df) + 120))
+
+
+def plot_replanning_timeline(laps: pd.DataFrame, decisions: pd.DataFrame, *, static_elapsed: Optional[np.ndarray] = None,
+                             title: str = "Rolling-horizon race: lap times and decisions") -> go.Figure:
+    """Observed (simulated truth) lap times with pit stops, neutralisations and re-optimisation points."""
+    if laps is None or laps.empty:
+        return empty_figure(title, "Run the replanning simulation.")
+    fig = go.Figure()
+    _shade_status(fig, laps["lap"].tolist(), laps["track_status"].tolist())
+    fig.add_trace(go.Scatter(x=laps["lap"], y=laps["lap_time_s"], mode="lines+markers", name="Lap time (simulated race)",
+                             line={"width": 2, "color": SERIES[0]}, marker={"size": 6},
+                             customdata=laps[["tyre_compound", "tyre_age_laps"]],
+                             hovertemplate="Lap %{x}<br>%{y:.2f} s<br>%{customdata[0]} age %{customdata[1]}<extra></extra>"))
+    pits = laps[laps["pit_time_s"] > 0]
+    fig.add_trace(go.Scatter(x=pits["lap"], y=pits["lap_time_s"], mode="markers", name="Pit stop (in-lap)",
+                             marker={"size": 14, "symbol": "triangle-down", "color": SERIES[1], "line": {"width": 2, "color": SURFACE}}))
+    if decisions is not None and not decisions.empty:
+        d = decisions[decisions["replanned"]]
+        y = laps.set_index("lap").reindex(d["lap"])["lap_time_s"].to_numpy()
+        fig.add_trace(go.Scatter(x=d["lap"], y=y, mode="markers", name="Re-optimised", text=d["action"],
+                                 customdata=d[["triggers"]],
+                                 marker={"size": 10, "symbol": "diamond", "color": SERIES[2], "line": {"width": 2, "color": SURFACE}},
+                                 hovertemplate="Lap %{x}: %{text}<br>%{customdata[0]}<extra></extra>"))
+    return _layout(fig, title, "Lap", "Lap time (s)")

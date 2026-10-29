@@ -17,12 +17,14 @@ from racesim.plotting import (
     plot_tyre_degradation,
 )
 from racesim.tyre_model import compare_tyre_compounds, estimate_tyre_degradation
-from racesim.validation import generate_validation_report
+from racesim.validation import EVIDENCE_TYPES, run_model_validation
 
 
 @st.cache_data(show_spinner="Validating the tyre model on held-out stints...", max_entries=8)
-def _validation(df: pd.DataFrame, fuel_effect: float, method: str, seed: int) -> dict:
-    return generate_validation_report(df, fuel_effect_s_per_kg=fuel_effect, method=method, seed=seed)
+def _validation(df: pd.DataFrame, setup_json: str, method: str, seed: int, level: float):
+    from dashboard.common import setup_from_json
+
+    return run_model_validation(df, setup_from_json(setup_json), method=method, seed=seed, interval_level=level)
 
 
 def render(ctx: DashboardContext) -> None:
@@ -102,22 +104,47 @@ def render(ctx: DashboardContext) -> None:
     if not {"tyre_compound", "tyre_age_laps"} <= cols:
         st.info("Validation disabled: tyre columns are required.")
         return
-    c = st.columns(2)
+    c = st.columns(3)
     method = c[0].selectbox("Split", ["stint", "driver"], help="Whole stints (or drivers) are held out to avoid leakage between adjacent laps.")
     seed = c[1].number_input("Split seed", 0, 1000, value=0)
-    vr = _validation(ann, setup.race.fuel_effect_s_per_kg, method, int(seed))
-    for w in vr["warnings"]:
+    level = c[2].slider("Prediction interval", 0.5, 0.99, 0.9, 0.01)
+    vr = _validation(ctx.data.data, ctx.setup_json, method, int(seed), float(level))
+    st.session_state["valid_store"] = {"result": vr, "setup": ctx.setup_json}
+    label = {"synthetic_self_consistency": "warning", "historical_out_of_sample": "success", "unlabelled": "info"}
+    getattr(st, label.get(vr.evidence_type, "info"))(vr.headline)
+    st.caption(f"Evidence type: {vr.evidence_type} - {EVIDENCE_TYPES.get(vr.evidence_type, '')} "
+               f"Leakage check: {vr.report.get('leakage_check')}")
+    for w in vr.report.get("warnings", []):
         st.warning(w)
-    if vr["status"] != "conclusive":
+    for name, rep in vr.separate_results.items():
+        st.caption(f"Separate result for {name}: status {rep['status']}, evidence {rep['evidence_type']}.")
+    if vr.status != "conclusive":
         st.info("Validation inconclusive - no accuracy figures are reported.")
-        return
-    mt = pd.DataFrame([{"model": m, "MAE (s)": v["mae_s"], "RMSE (s)": v["rmse_s"], "bias (s, pred - obs)": v["bias_s"],
-                        "validation laps": v["n_validation"], "training laps": v["n_train"]} for m, v in vr["models"].items()])
-    st.dataframe(mt, hide_index=True)
-    if "comparison" in vr:
-        st.caption(vr["comparison"])
-    c1, c2 = st.columns(2)
-    with c1:
-        show(plot_model_residuals(vr["predictions"]))
-    with c2:
-        show(plot_residuals_by_age(vr["predictions"]))
+    else:
+        st.dataframe(vr.metrics_table(), hide_index=True)
+        if "comparison" in vr.report:
+            st.caption(vr.report["comparison"])
+        c1, c2 = st.columns(2)
+        with c1:
+            show(plot_model_residuals(vr.report["predictions"]))
+        with c2:
+            show(plot_residuals_by_age(vr.report["predictions"]))
+        ra = vr.report.get("residual_analysis") or {}
+        if "diagnostics" in ra:
+            st.markdown("**Residual diagnostics** (slope vs tyre age; within-stint lag-1 autocorrelation)")
+            st.dataframe(ra["diagnostics"], hide_index=True)
+    if vr.calibration is not None:
+        st.subheader("Tyre degradation calibration")
+        st.dataframe(vr.calibration.table, hide_index=True)
+        for w in vr.calibration.warnings:
+            st.caption(w)
+        if vr.calibration.recommended_overrides:
+            st.button("Apply fitted linear degradation to the model", on_click=_apply_calibration,
+                      args=(vr.calibration.recommended_overrides,),
+                      help="Copies the reliable fitted slopes into Section B's tyre parameters (all analyses update).")
+        st.download_button("Calibration table (CSV)", to_csv_bytes(vr.calibration.table), "tyre_calibration.csv", "text/csv")
+
+
+def _apply_calibration(overrides: dict) -> None:
+    for comp, vals in overrides.items():
+        st.session_state[f"ov_lin_{comp}"] = round(float(vals["linear_degradation_s_per_lap"]), 4)

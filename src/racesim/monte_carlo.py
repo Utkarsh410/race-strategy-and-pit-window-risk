@@ -93,7 +93,7 @@ def sample_traffic(rng: np.random.Generator, n_sims: int, n_laps: int, cfg: Traf
     return np.where(hit, rng.exponential(cfg.traffic_mean_loss_s, (n_sims, n_laps)), 0.0)
 
 
-DEFAULT_FLAGS = ("parameter", "lap_variability", "events", "pit_variability", "traffic", "reactive")
+DEFAULT_FLAGS = ("parameter", "lap_variability", "events", "pit_variability", "traffic", "reactive", "rival_behaviour")
 
 
 def resolve_flags(setup: SimulatorSetup, overrides: Optional[dict] = None) -> dict[str, bool]:
@@ -105,6 +105,7 @@ def resolve_flags(setup: SimulatorSetup, overrides: Optional[dict] = None) -> di
         "pit_variability": mc.include_pit_variability,
         "traffic": mc.include_traffic,
         "reactive": mc.reactive_strategy,
+        "rival_behaviour": mc.include_rival_uncertainty,
     }
     for k, v in (overrides or {}).items():
         if k not in flags:
@@ -155,8 +156,14 @@ def build_scenario(
             r.pit_lane_z, r.pit_stationary_z, r.pit_slow_u = p["lane_z"], p["stationary_z"], p["slow_u"]
         if flags["traffic"]:
             r.traffic_s = sample_traffic(rng_for(seed, b, "traffic", car_id), n_sims, n_laps, setup.traffic)
+        if flags.get("rival_behaviour") and car_id != "OWN":
+            g = rng_for(seed, b, "rival_behaviour", car_id)
+            r.pace_bias_s = r.pace_bias_s + mc.rival_pace_uncertainty_s * g.standard_normal(n_sims)
+            j = mc.rival_pit_lap_jitter_laps
+            r.pit_lap_shift = g.integers(-j, j + 1, size=n_sims)
         return r
 
+    flags = {**flags, "rival_behaviour": flags.get("rival_behaviour", False)}
     active = [k for k, v in flags.items() if v]
     return Scenario(n_sims, n_laps, status, weather.track_temperature_c, weather.wetness, deg,
                     deterministic=not any(flags[k] for k in ("parameter", "lap_variability", "events", "pit_variability", "traffic")),

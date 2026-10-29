@@ -19,7 +19,10 @@ for p in (ROOT, ROOT / "src"):  # allow running without an editable install
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from dashboard import overview, pit_window_view, rival_analysis, risk_analysis, strategy_planner, telemetry_analysis  # noqa: E402
+from dashboard import (  # noqa: E402
+    overview, pit_window_view, replanning_view, rival_analysis, risk_analysis, strategy_planner, telemetry_analysis,
+    uncertainty_view,
+)
 from dashboard.common import cached_synthetic, make_context, ss  # noqa: E402
 from racesim.data_ingestion import DataValidationError, load_race_dataframe  # noqa: E402
 from racesim.data_validation import clean_lap_times  # noqa: E402
@@ -89,8 +92,9 @@ def main() -> None:
                         help="Seeds the Monte Carlo engine and the synthetic demo data.")
         st.caption("Model assumptions are set inside each section and shared by every analysis.")
     tabs = st.tabs(["A. Race overview", "B. Strategy planner", "C. Pit window", "D. Monte Carlo risk",
-                    "E. Rival strategy", "F. Telemetry & validation"])
-    sections = [overview, strategy_planner, pit_window_view, risk_analysis, rival_analysis, telemetry_analysis]
+                    "E. Rival strategy", "F. Telemetry & validation", "G. Dynamic replanning", "H. Sensitivity & uncertainty"])
+    sections = [overview, strategy_planner, pit_window_view, risk_analysis, rival_analysis, telemetry_analysis, replanning_view,
+                uncertainty_view]
     for tab, section in zip(tabs, sections):
         with tab:
             try:

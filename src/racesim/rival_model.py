@@ -265,3 +265,165 @@ def evaluate_rival_response(setup: SimulatorSetup, *, current_lap: int, gap_s: f
             continue
         rows.append(res.as_dict())
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# v2: gap evolution, rejoin estimates, traffic exposure, response scenarios,
+# safety-car position changes. All use the shared engine (run_race) with the
+# simplified aggregate-time interaction model described in the module docstring.
+# ---------------------------------------------------------------------------
+
+
+def _multi_car_run(setup: SimulatorSetup, own_strategy: Strategy, rivals: Sequence[RivalConfig | CarSpec],
+                   events: Optional[Sequence[RaceEvent]] = None, interactions: bool = True):
+    n = setup.race.total_laps
+    cars = [CarSpec("OWN", own_strategy, label="Own car")] + [
+        r if isinstance(r, CarSpec) else CarSpec.from_rival(r, n) for r in rivals]
+    out = run_race(setup, cars, deterministic_scenario(setup, events), record_history=True, reactive=False,
+                   interactions=interactions)
+    return cars, out
+
+
+def gap_evolution(setup: SimulatorSetup, own_strategy: Strategy, rivals: Sequence[RivalConfig | CarSpec], *,
+                  events: Optional[Sequence[RaceEvent]] = None, interactions: bool = True) -> pd.DataFrame:
+    """Lap-by-lap gap to each rival with the events that moved it.
+
+    ``gap_s = own elapsed - rival elapsed`` (start offsets included; positive =
+    own car behind). ``gap_change_s`` is the change over the lap, and the pit,
+    dirty-air and safety-car-bunching columns explain it.
+    """
+    from racesim.safety_car_model import STATUS_LABELS
+
+    cars, out = _multi_car_run(setup, own_strategy, rivals, events, interactions)
+    laps = np.arange(own_strategy.start_lap, setup.race.total_laps + 1)
+    own_h = out.history["OWN"]
+    own_e = own_h["elapsed_s"][0] + cars[0].start_offset_s
+    rows = []
+    for c in cars[1:]:
+        h = out.history[c.car_id]
+        gap = calculate_time_gap(own_e, h["elapsed_s"][0] + c.start_offset_s)
+        start_gap = cars[0].start_offset_s - c.start_offset_s
+        rows.append(pd.DataFrame({
+            "lap": laps, "rival_id": c.car_id, "rival": c.label or c.car_id, "gap_s": gap,
+            "gap_change_s": np.diff(np.concatenate([[start_gap], gap])),
+            "own_pit": own_h["pit_time_s"][0] > 0, "rival_pit": h["pit_time_s"][0] > 0,
+            "own_dirty_air_s": own_h["interaction_s"][0], "own_sc_bunching_s": own_h["bunching_s"][0],
+            "rival_sc_bunching_s": h["bunching_s"][0],
+            "track_status": [STATUS_LABELS[int(s)] for s in own_h["status"][0]],
+        }))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def predict_pit_rejoin(setup: SimulatorSetup, own_strategy: Strategy, pit_lap: int, rivals: Sequence[RivalConfig | CarSpec], *,
+                       events: Optional[Sequence[RaceEvent]] = None) -> dict:
+    """Where the own car rejoins after stopping on ``pit_lap`` and how exposed it is to traffic.
+
+    Rejoin position compares the own elapsed time at the end of the in-lap
+    (including the pit cost) with every other car's elapsed time at the end of
+    the same lap. Traffic exposure counts cars within ``rejoin_traffic_window_s``
+    ahead at the rejoin and the dirty-air time actually lost over the next
+    ``traffic_exposure_laps`` laps in the simulation.
+    """
+    if pit_lap not in own_strategy.planned_pit_laps:
+        raise ValueError(f"lap {pit_lap} is not a planned stop of {own_strategy.strategy_name}")
+    cars, out = _multi_car_run(setup, own_strategy, rivals, events)
+    i = pit_lap - own_strategy.start_lap
+    own_e = float(out.history["OWN"]["elapsed_s"][0][i] + cars[0].start_offset_s)
+    others = {c.car_id: float(out.history[c.car_id]["elapsed_s"][0][i] + c.start_offset_s) for c in cars[1:]}
+    rejoin = predict_rejoin_position(own_e, list(others.values()))
+    tr = setup.traffic
+    ahead_close = [cid for cid, e in others.items() if 0 < own_e - e <= tr.rejoin_traffic_window_s]
+    window = slice(i + 1, min(i + 1 + tr.traffic_exposure_laps, len(out.history["OWN"]["interaction_s"][0])))
+    lost = float(out.history["OWN"]["interaction_s"][0][window].sum())
+    return {
+        "pit_lap": pit_lap, "pit_cost_s": float(out.history["OWN"]["pit_time_s"][0][i]),
+        "rejoin_position": rejoin["position"], "gap_to_car_ahead_s": rejoin["gap_to_car_ahead_s"],
+        "gap_to_car_behind_s": rejoin["gap_to_car_behind_s"], "cars_within_traffic_window": ahead_close,
+        "dirty_air_loss_next_laps_s": lost, "laps_checked": tr.traffic_exposure_laps,
+        "elapsed_by_car_s": {"OWN": own_e, **others},
+    }
+
+
+def compare_pit_lap_rejoins(setup: SimulatorSetup, own_strategy: Strategy, rivals: Sequence[RivalConfig | CarSpec],
+                            pit_laps: Sequence[int], *, stop_index: int = 0,
+                            events: Optional[Sequence[RaceEvent]] = None) -> pd.DataFrame:
+    """Rejoin position, traffic exposure and race time for alternative laps of one stop."""
+    rows = []
+    for p in pit_laps:
+        laps = list(own_strategy.planned_pit_laps)
+        laps[stop_index] = p
+        try:
+            st = Strategy.from_plan(setup.race.total_laps, laps, list(own_strategy.planned_compounds),
+                                    start_lap=own_strategy.start_lap,
+                                    starting_tyre_age_laps=own_strategy.stints[0].starting_tyre_age_laps)
+        except ValueError:
+            continue
+        r = predict_pit_rejoin(setup, st, p, rivals, events=events)
+        res = simulate_race(setup, st, events=events, rivals=list(rivals), reactive=False)
+        rows.append({"pit_lap": p, "rejoin_position": r["rejoin_position"], "gap_to_car_ahead_s": r["gap_to_car_ahead_s"],
+                     "cars_in_traffic_window": len(r["cars_within_traffic_window"]),
+                     "dirty_air_loss_next_laps_s": r["dirty_air_loss_next_laps_s"],
+                     "race_time_s": res.predicted_race_time_s, "finishing_position": res.finishing_position})
+    return pd.DataFrame(rows)
+
+
+RESPONSES = ("cover next lap", "planned lap", "extend 3 laps", "extend 6 laps")
+
+
+def rival_response_scenarios(setup: SimulatorSetup, *, current_lap: int, gap_s: float, own_compound: str, own_tyre_age_laps: int,
+                             own_new_compound: str, own_pit_lap: int, rival_planned_pit_lap: int,
+                             rival_compound: Optional[str] = None, rival_tyre_age_laps: Optional[int] = None,
+                             rival_new_compound: Optional[str] = None, rival_pace_offset_s: float = 0.0,
+                             rival_degradation_multiplier: float = 1.0, events: Optional[Sequence[RaceEvent]] = None) -> pd.DataFrame:
+    """Outcome of an own pit call against named rival responses.
+
+    Responses: cover (pit the lap after the own stop), the rival's planned
+    lap, and extending 3 or 6 laps beyond the plan. Each is simulated with the
+    same model; rows where the response lap is infeasible are omitted.
+    """
+    last = setup.race.total_laps - setup.race.minimum_pit_laps_remaining
+    laps = {"cover next lap": own_pit_lap + 1, "planned lap": rival_planned_pit_lap,
+            "extend 3 laps": rival_planned_pit_lap + 3, "extend 6 laps": rival_planned_pit_lap + 6}
+    rows = []
+    for name, rp in laps.items():
+        if rp <= current_lap or rp > last or rp == own_pit_lap:
+            continue
+        fn = evaluate_undercut if own_pit_lap < rp else evaluate_overcut
+        res = fn(setup, current_lap=current_lap, gap_s=gap_s, own_compound=own_compound, own_tyre_age_laps=own_tyre_age_laps,
+                 own_new_compound=own_new_compound, own_pit_lap=own_pit_lap, rival_pit_lap=rp, rival_compound=rival_compound,
+                 rival_tyre_age_laps=rival_tyre_age_laps, rival_new_compound=rival_new_compound,
+                 rival_pace_offset_s=rival_pace_offset_s, rival_degradation_multiplier=rival_degradation_multiplier, events=events)
+        rows.append({"response": name, **res.as_dict()})
+    return pd.DataFrame(rows)
+
+
+def safety_car_position_changes(setup: SimulatorSetup, own_strategy: Strategy, rivals: Sequence[RivalConfig | CarSpec], *,
+                                sc_start_lap: int, duration_laps: int = 4) -> pd.DataFrame:
+    """Order and gaps before the SC, after bunching, and at the finish, versus a green race.
+
+    Order is inferred from elapsed time (simplified model). Plans are followed
+    as written (no reactive stops) so the effect of the neutralisation alone is
+    isolated.
+    """
+    n = setup.race.total_laps
+    ev = [RaceEvent(event_type="safety_car", start_lap=sc_start_lap, duration_laps=min(duration_laps, n - sc_start_lap + 1))]
+    end = min(sc_start_lap + duration_laps - 1, n)
+    cars, out = _multi_car_run(setup, own_strategy, rivals, ev)
+    _, green = _multi_car_run(setup, own_strategy, rivals, None)
+    rows = []
+    for c in cars:
+        def at(o, lap):
+            return float(o.history[c.car_id]["elapsed_s"][0][lap - own_strategy.start_lap] + c.start_offset_s)
+        rows.append({"car_id": c.car_id, "car": c.label or c.car_id,
+                     "elapsed_before_sc_s": at(out, sc_start_lap - 1) if sc_start_lap > 1 else c.start_offset_s,
+                     "elapsed_after_sc_s": at(out, end), "elapsed_finish_s": at(out, n), "green_finish_s": at(green, n),
+                     "sc_bunching_s": float(out.history[c.car_id]["bunching_s"][0].sum())})
+    df = pd.DataFrame(rows)
+    for col, pos in (("elapsed_before_sc_s", "position_before_sc"), ("elapsed_after_sc_s", "position_after_sc"),
+                     ("elapsed_finish_s", "position_finish"), ("green_finish_s", "position_finish_green")):
+        df[pos] = df[col].rank(method="first").astype(int)
+    leader_before, leader_after = df["elapsed_before_sc_s"].min(), df["elapsed_after_sc_s"].min()
+    df["gap_to_leader_before_s"] = df["elapsed_before_sc_s"] - leader_before
+    df["gap_to_leader_after_s"] = df["elapsed_after_sc_s"] - leader_after
+    df["positions_gained_vs_green"] = df["position_finish_green"] - df["position_finish"]
+    return df

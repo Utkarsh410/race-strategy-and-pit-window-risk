@@ -8,7 +8,10 @@ import streamlit as st
 from dashboard.common import DashboardContext, cached_optimisation, show
 from racesim.plotting import SERIES, _layout, plot_rival_gaps
 from racesim.race_simulator import simulate_race
-from racesim.rival_model import RIVAL_ASSUMPTIONS, evaluate_overcut, evaluate_rival_response, evaluate_undercut, predict_rival_pit_window
+from racesim.rival_model import (
+    RIVAL_ASSUMPTIONS, compare_pit_lap_rejoins, evaluate_overcut, evaluate_rival_response, evaluate_undercut, gap_evolution,
+    predict_rival_pit_window, rival_response_scenarios, safety_car_position_changes,
+)
 from racesim.schemas import RaceSnapshot
 
 
@@ -42,6 +45,9 @@ def render(ctx: DashboardContext) -> None:
             c[i + 1].metric(setup.rivals[i].name, f"P{info['finishing_position']}",
                             help=f"Plan {setup.rivals[i].pit_laps} on {setup.rivals[i].compounds}")
         st.caption("Deterministic race. Includes dirty-air and safety-car bunching interactions; see Section D for probabilities.")
+
+    if opt.best is not None and setup.rivals:
+        _track_position(setup, opt.best.strategy)
 
     st.subheader("Undercut / overcut analysis")
     c = st.columns(4)
@@ -91,6 +97,11 @@ def render(ctx: DashboardContext) -> None:
     show(plot_rival_gaps(res.gap_history[["lap", "gap_s"]].rename(columns={"gap_s": "Gap to rival"}),
                          title=f"Gap evolution - own pit L{own_pit}, rival pit L{rival_pit}"))
 
+    st.subheader("Named rival responses")
+    named = rival_response_scenarios(setup, own_pit_lap=int(own_pit), rival_planned_pit_lap=int(rival_pit),
+                                     **{k: v for k, v in kw.items()})
+    st.dataframe(named, hide_index=True)
+
     st.subheader("Sensitivity to the rival's response")
     lo = int(current) + 1
     hi = n - setup.race.minimum_pit_laps_remaining
@@ -106,3 +117,31 @@ def render(ctx: DashboardContext) -> None:
     fig.add_vline(x=int(own_pit), line={"color": SERIES[1], "width": 1, "dash": "dot"}, annotation_text="own pit lap")
     show(_layout(fig, "Gap after both stops vs rival pit lap (negative = own car ahead)", "Rival pit lap", "Gap (s)", legend=False))
     st.dataframe(resp, hide_index=True)
+
+
+def _track_position(setup, strategy) -> None:
+    """Gap evolution, rejoin/traffic exposure and safety-car position changes for the recommended plan."""
+    n = setup.race.total_laps
+    st.subheader("Track position (simplified, elapsed-time based)")
+    st.caption(f"Assumptions: dirty-air threshold {setup.traffic.dirty_air_threshold_s} s, loss "
+               f"{setup.traffic.dirty_air_loss_s_per_lap} s/lap, overtake needs {setup.traffic.overtake_pace_delta_s} s/lap, "
+               f"rejoin traffic window {setup.traffic.rejoin_traffic_window_s} s, SC bunching gap "
+               f"{setup.race_control.sc_bunching_gap_s} s (configurable in the race YAML).")
+    g = gap_evolution(setup, strategy, setup.rivals)
+    with st.expander("Gap evolution table (what moved the gap each lap)"):
+        st.dataframe(g, hide_index=True)
+    if strategy.planned_pit_laps:
+        p0 = strategy.planned_pit_laps[0]
+        lo = max(strategy.start_lap + setup.effective_min_stint_laps - 1, p0 - 6)
+        hi = min(n - setup.race.minimum_pit_laps_remaining, p0 + 6)
+        if len(strategy.planned_pit_laps) > 1:
+            hi = min(hi, strategy.planned_pit_laps[1] - setup.effective_min_stint_laps)
+        st.markdown(f"**Rejoin position and traffic exposure for the first stop** ({strategy.strategy_name}, other stops fixed)")
+        tbl = compare_pit_lap_rejoins(setup, strategy, setup.rivals, range(lo, hi + 1))
+        st.dataframe(tbl, hide_index=True)
+    c = st.columns(2)
+    sc_lap = c[0].number_input("Safety car on lap (position-change analysis)", 2, n - 2, value=min(30, n - 3))
+    sc_len = c[1].number_input("SC length (laps)", 1, 10, value=4, key="sc_pos_len")
+    df = safety_car_position_changes(setup, strategy, setup.rivals, sc_start_lap=int(sc_lap), duration_laps=int(sc_len))
+    st.dataframe(df[["car", "position_before_sc", "gap_to_leader_before_s", "position_after_sc", "gap_to_leader_after_s",
+                     "sc_bunching_s", "position_finish", "position_finish_green", "positions_gained_vs_green"]], hide_index=True)

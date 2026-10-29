@@ -26,6 +26,7 @@ from racesim.schemas import (
     RaceConfig,
     RaceControlConfig,
     RegulationsConfig,
+    ReplanningConfig,
     RivalConfig,
     TrafficConfig,
     TyreModelConfig,
@@ -54,6 +55,7 @@ class SimulatorSetup(BaseModel):
     traffic: TrafficConfig = Field(default_factory=TrafficConfig)
     rivals: list[RivalConfig] = Field(default_factory=list)
     monte_carlo: MonteCarloConfig = Field(default_factory=MonteCarloConfig)
+    replanning: ReplanningConfig = Field(default_factory=ReplanningConfig)
     regulations: RegulationsConfig
     baseline_strategy: Optional[BaselineStrategyConfig] = None
     driver_offsets_s: dict[str, float] = Field(default_factory=dict)

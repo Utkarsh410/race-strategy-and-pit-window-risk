@@ -19,7 +19,10 @@ import pandas as pd
 from racesim import __version__
 from racesim.config import setup_to_dict
 from racesim.plotting import (
+    plot_convergence,
     plot_cumulative_distribution,
+    plot_replanning_timeline,
+    plot_uncertainty_breakdown,
     plot_delta_distribution,
     plot_lap_time_progression,
     plot_monte_carlo_distribution,
@@ -44,6 +47,10 @@ LIMITATIONS = [
     "Reactive decisions use the team's deterministic model and can be wrong ex post (strategy uncertainty).",
     "Deterministic optimum minimises expected race time only; it does not guarantee a result or the lowest risk.",
     "Monte Carlo results are reproducible for an identical seed, simulation count, batch size and configuration.",
+    "Monte Carlo confidence intervals measure simulation precision only; more runs do not make predictions accurate for a real race.",
+    "Rolling-horizon replanning is demonstrated on deterministic simulated races that use the same model as the engine; "
+    "real-race benefit is unvalidated. The remaining SC length and rain duration are assumed from configuration.",
+    "Validation on SYNTHETIC data only checks self-consistency; no historical data are bundled with the project.",
 ]
 
 _CSS = """
@@ -135,7 +142,9 @@ def generate_strategy_report(bundle, path: Optional[str | Path] = None, *, title
     title = title or f"RaceSim strategy report - {race.race_name}"
     parts = [f"<h1>{_esc(title)}</h1>",
              f"<p class='muted'>Generated {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')} by RaceSim {__version__}.</p>",
-             f"<div class='banner'><b>{_esc(race.data_label)}</b>. Results are model outputs, not measurements, and do not guarantee any race outcome.</div>"]
+             f"<div class='banner'><b>{_esc(race.data_label)}</b>. Results are model outputs, not measurements, and do not guarantee any race outcome.</div>",
+             "<p><b>Analyses executed in this report:</b> " + _esc(", ".join(bundle.analyses_run) or "none") +
+             ". Sections for analyses that were not executed are labelled <i>not run</i>.</p>"]
 
     # 1. Race configuration
     parts.append("<h2>1. Race configuration</h2>")
@@ -216,6 +225,28 @@ def generate_strategy_report(bundle, path: Optional[str | Path] = None, *, title
             parts.append(fig(plot_delta_distribution(paired_deltas(mc, base.strategy_id), names)))
         if bundle.objectives is not None:
             parts.append("<h3>Objectives can recommend different strategies</h3>" + _table(bundle.objectives))
+        parts.append("<h3>Simulation precision (Monte Carlo error)</h3>")
+        parts.append("<p class='muted'>These intervals describe how precisely the <i>model's</i> answer has been estimated. "
+                     "They are not a measure of real-world accuracy.</p>")
+        parts.append(_table(bundle.precision.drop(columns=["strategy_id"]) if bundle.precision is not None else None))
+        if bundle.convergence is not None:
+            parts.append(fig(plot_convergence(bundle.convergence)))
+            cs = bundle.convergence_summary or {}
+            parts.append(_kv({"Converged (all criteria)": cs.get("converged"), "Checks": cs.get("checks"),
+                              "Criteria": cs.get("criteria")}))
+        if bundle.tail_stability:
+            parts.append("<h3>Downside-risk (CVaR95) stability</h3>")
+            parts.append(_table(pd.DataFrame([{"strategy": names.get(sid, sid), "cvar95_s": t.cvar95_s,
+                                               "bootstrap_se_s": t.bootstrap_se_s, "ci95_s": f"[{t.ci95_s[0]:,.2f}, {t.ci95_s[1]:,.2f}]",
+                                               "split_half_difference_s": t.split_half_difference_s, "tail_runs": t.tail_samples,
+                                               "stable": t.stable, "reasons": "; ".join(t.reasons)}
+                                              for sid, t in bundle.tail_stability.items()])))
+    parts.append("<h3>Model uncertainty</h3><ul>" + "".join(f"<li>{_esc(l)}</li>" for l in bundle.model_uncertainty) + "</ul>")
+    parts.append("<h3>Uncertainty breakdown by source</h3>")
+    if bundle.uncertainty_breakdown is None:
+        parts.append("<p class='muted'>Uncertainty breakdown: not run.</p>")
+    else:
+        parts.append(fig(plot_uncertainty_breakdown(bundle.uncertainty_breakdown)) + _table(bundle.uncertainty_breakdown))
     # 7. SC scenarios
     parts.append("<h2>7. Safety-car scenario analysis</h2>")
     parts.append("<p class='muted'>Deterministic races with one safety car (4 laps) at different laps; the team may bring a "
@@ -243,6 +274,47 @@ def generate_strategy_report(bundle, path: Optional[str | Path] = None, *, title
     parts.append("<h2>10. Data provenance</h2>")
     parts.append(_kv(bundle.data_provenance))
     parts.append("<h3>Full configuration</h3><pre>" + _esc(json.dumps(setup_to_dict(setup), indent=2)) + "</pre>")
+
+    # 11-12. v2 sections (after the v1 sections, whose numbering is unchanged)
+    parts.append("<h2>11. Dynamic replanning and decision log</h2>")
+    rr = bundle.rolling_race
+    if rr is None:
+        parts.append("<p class='muted'>Dynamic replanning: not run.</p>")
+    else:
+        parts.append(_kv({"Events in simulated race": ", ".join(f"{e.event_type.value} lap {e.start_lap} ({e.duration_laps} laps)"
+                                                               for e in rr.events) or "none",
+                          "Race time with replanning": f"{rr.total_race_time_s:,.2f} s",
+                          "Race time, static plan": f"{rr.static_plan_race_time_s:,.2f} s",
+                          "Race time, v1 reactive SC/rain heuristic": f"{rr.reactive_policy_race_time_s:,.2f} s",
+                          "Gain vs static plan": f"{rr.gain_vs_static_s:+.2f} s",
+                          "Pit laps / compounds": f"{rr.own_pit_laps} / {' > '.join(rr.own_compounds)}",
+                          "Finishing position (replanning / static)": f"{rr.finishing_position} / {rr.static_finishing_position}"}))
+        parts.append("<p class='muted'>Deterministic example: the simulated race and the engine's predictions use the same model, "
+                     "so the gain shows the decision logic working, not a forecast of real-race benefit.</p>")
+        parts.append(fig(plot_replanning_timeline(rr.laps, rr.decision_log.to_dataframe())))
+        log = rr.decision_log
+        replanned = [r for r in log.records if r.replanned]
+        from racesim.decision_log import DecisionLog
+
+        parts.append(f"<p class='muted'>{len(log)} decision points; {len(replanned)} re-optimisations shown "
+                     "(carried-forward decisions are in the CSV export).</p>")
+        parts.append(DecisionLog(log.configuration, replanned).to_html())
+    parts.append("<h2>12. Model validation</h2>")
+    v = bundle.validation
+    if v is None:
+        parts.append("<p class='muted'>Model validation: not run.</p>")
+    else:
+        parts.append(f"<div class='banner'>{_esc(v.headline)}</div>")
+        parts.append(_kv({"Evidence type": v.evidence_type, "Status": v.status,
+                          "Split method": v.report.get("method"), "Leakage check": v.report.get("leakage_check")}))
+        parts.append(_table(v.metrics_table()))
+        for w in v.report.get("warnings", []):
+            parts.append(f"<p class='muted'>Warning: {_esc(w)}</p>")
+        if v.calibration is not None:
+            parts.append("<h3>Tyre degradation calibration (not applied automatically)</h3>" + _table(v.calibration.table))
+        ra = v.report.get("residual_analysis") or {}
+        if "diagnostics" in ra:
+            parts.append("<h3>Residual diagnostics</h3>" + _table(ra["diagnostics"]))
 
     doc = (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
            f"<title>{_esc(title)}</title><style>{_CSS}</style></head><body><main>{''.join(parts)}</main></body></html>")

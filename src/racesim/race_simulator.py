@@ -85,6 +85,11 @@ class CarSpec:
     start_offset_s: float = 0.0
     lap_time_std_s: Optional[float] = None
     label: str = ""
+    # Observed state for a race that is already under way (all default to the
+    # values implied by the strategy, so a fresh race is unaffected).
+    initial_fuel_kg: Optional[float] = None
+    initial_wear_laps: Optional[float] = None
+    initial_track_status: int = 0
 
     @classmethod
     def from_rival(cls, rival: RivalConfig, total_laps: int) -> "CarSpec":
@@ -114,6 +119,7 @@ class CarRandomness:
     pit_stationary_z: np.ndarray
     pit_slow_u: np.ndarray
     traffic_s: np.ndarray
+    pit_lap_shift: Optional[np.ndarray] = None  # integer laps added to every planned stop (rival behaviour)
 
     @classmethod
     def zeros(cls, n_sims: int, n_laps: int, n_stop_slots: int = 12) -> "CarRandomness":
@@ -159,7 +165,8 @@ class Scenario:
 
         def factory(car_id: str) -> CarRandomness:
             r = parent.car_randomness(car_id)
-            return CarRandomness(*(getattr(r, f)[sl] for f in CarRandomness.__dataclass_fields__))
+            return CarRandomness(*(None if getattr(r, f) is None else getattr(r, f)[sl]
+                                   for f in CarRandomness.__dataclass_fields__))
 
         return Scenario(1, self.n_laps, self.track_status[sl], self.track_temperature_c[sl], self.wetness[sl],
                         self.degradation_multiplier[sl], self.deterministic, dict(self.flags), factory,
@@ -231,6 +238,8 @@ def initial_race_state(setup: SimulatorSetup, ctx: LapModelContext, car: CarSpec
     offs = [setup.driver_offsets_s.get(s.driver_id, 0.0) for s in st.stints]
     offs = np.array(offs + [offs[-1]] * (width + 1 - len(offs)))
     dry = [i for i in comps_idx if ctx.table.type_code[i] == 0]
+    if fuel_start_kg is None and car.initial_fuel_kg is not None:
+        fuel_start_kg = float(car.initial_fuel_kg)
     if fuel_start_kg is None:
         fuel_start_kg = float(fuel_at_lap_start(st.start_lap, setup.race.fuel_start_kg, setup.race.fuel_consumption_kg_per_lap))
         if setup.refuelling_allowed and setup.regulations.fuel_capacity_kg is not None:
@@ -243,7 +252,7 @@ def initial_race_state(setup: SimulatorSetup, ctx: LapModelContext, car: CarSpec
         elapsed_s=np.full(n_sims, car.start_offset_s, dtype=float),
         interaction_s=zeros.copy(),
         tyre_age_laps=np.full(n_sims, age0, dtype=float),
-        tyre_wear_laps=np.full(n_sims, age0, dtype=float),
+        tyre_wear_laps=np.full(n_sims, age0 if car.initial_wear_laps is None else car.initial_wear_laps, dtype=float),
         compound_idx=comps[:, 0].copy(),
         fuel_kg=np.full(n_sims, fuel_start_kg, dtype=float),
         stint_index=np.zeros(n_sims, dtype=int),
@@ -253,7 +262,7 @@ def initial_race_state(setup: SimulatorSetup, ctx: LapModelContext, car: CarSpec
         plan_compounds=comps,
         driver_offsets=offs,
         final_dry_compound=np.full(n_sims, dry[-1] if dry else comps_idx[-1]),
-        prev_status=np.zeros(n_sims, dtype=np.int8),
+        prev_status=np.full(n_sims, car.initial_track_status, dtype=np.int8),
         pit_cost_total_s=zeros.copy(),
         tyre_time_total_s=zeros.copy(),
         fuel_time_total_s=zeros.copy(),
@@ -590,6 +599,80 @@ def calculate_final_result(states: list[RaceState]) -> dict[str, CarOutcome]:
     return out
 
 
+HISTORY_KEYS = ("lap_time_s", "pit_time_s", "elapsed_s", "fuel_kg", "tyre_age_laps", "compound_idx", "status", "interaction_s", "bunching_s")
+
+
+def apply_pit_lap_shift(state: RaceState, shift: Optional[np.ndarray], setup: SimulatorSetup) -> None:
+    """Shift every planned stop by a per-simulation integer (rival-behaviour uncertainty).
+
+    The shift is clipped so the first stint keeps the minimum length and the
+    last stop leaves the minimum laps remaining; stop order is preserved.
+    """
+    if shift is None or not np.any(shift):
+        return
+    k = state.car.strategy.number_of_stops
+    if k == 0:
+        return
+    laps = state.plan_pit_laps[:, :k]
+    lo = state.car.strategy.start_lap - 1 + setup.effective_min_stint_laps - laps[:, 0]
+    hi = setup.race.total_laps - setup.race.minimum_pit_laps_remaining - laps[:, -1]
+    state.plan_pit_laps[:, :k] = laps + np.clip(shift, lo, hi)[:, None]
+
+
+def advance_lap(
+    setup: SimulatorSetup,
+    ctx: LapModelContext,
+    scenario: Scenario,
+    states: list[RaceState],
+    rand: list[CarRandomness],
+    lap: int,
+    *,
+    react_to_neutralisation: bool,
+    react_to_rain: bool,
+    gain_caches: Optional[list[dict]] = None,
+    interactions: bool = False,
+    history: Optional[dict] = None,
+) -> list[LapOutcome]:
+    """Advance every car by one lap (the body of :func:`run_race`).
+
+    Public so a rolling-horizon controller can step the *same* engine lap by
+    lap and change future plans between laps.
+    """
+    caches = gain_caches or [dict() for _ in states]
+    for s, cache in zip(states, caches):
+        apply_race_event(s, setup, ctx, scenario, lap, react_to_neutralisation=react_to_neutralisation,
+                         react_to_rain=react_to_rain, gain_cache=cache)
+    outcomes = [simulate_lap(s, setup, ctx, scenario, r, lap) for s, r in zip(states, rand)]
+    extras = _dirty_air_adjustment(states, outcomes, setup) if interactions else [None] * len(states)
+    for s, o, ex in zip(states, outcomes, extras):
+        if history is not None:
+            h = history[s.car.car_id]
+            h["fuel_kg"].append(o.fuel_before_kg.copy())
+            h["tyre_age_laps"].append(o.tyre_age_before.copy())
+            h["compound_idx"].append(o.compound_before.copy())
+            h["status"].append(o.status.copy())
+            h["lap_time_s"].append(o.lap_time_s + (0 if ex is None else ex))
+            h["pit_time_s"].append(o.pit_cost_s)
+            h["interaction_s"].append(np.zeros(s.n) if ex is None else ex.copy())  # dirty air (already in lap_time_s)
+            h["bunching_s"].append(np.zeros(s.n))
+        update_race_state(s, o, ctx, ex)
+    if interactions:
+        n = scenario.n_sims
+        st = scenario.track_status[:, lap - 1]
+        nxt = scenario.track_status[:, lap] if lap < setup.race.total_laps else np.zeros(n, dtype=np.int8)
+        ending = (st == TrackStatus.SAFETY_CAR) & (nxt != TrackStatus.SAFETY_CAR)
+        if np.any(ending):
+            before = [s.interaction_s.copy() for s in states]
+            _apply_safety_car_bunching(states, setup, ending)
+            if history is not None:
+                for s, b in zip(states, before):
+                    history[s.car.car_id]["bunching_s"][-1] = s.interaction_s - b  # SC gap compression (not in lap_time_s)
+    if history is not None:
+        for s in states:
+            history[s.car.car_id]["elapsed_s"].append(s.elapsed_s - s.car.start_offset_s)
+    return outcomes
+
+
 def run_race(
     setup: SimulatorSetup,
     cars: Sequence[CarSpec],
@@ -617,35 +700,15 @@ def run_race(
     states = [initial_race_state(setup, ctx, c, n, record=record) for c in cars]
     rand = [scenario.car_randomness(c.car_id) for c in cars]
     multi = interactions and len(cars) > 1
-    hist_keys = ("lap_time_s", "pit_time_s", "elapsed_s", "fuel_kg", "tyre_age_laps", "compound_idx", "status")
+    hist_keys = HISTORY_KEYS
     hist = {c.car_id: {k: [] for k in hist_keys} for c in cars} if record else None
+    for s, r in zip(states, rand):
+        apply_pit_lap_shift(s, r.pit_lap_shift, setup)
     caches = [dict() for _ in cars]
     start_lap = next(iter(starts))
     for lap in range(start_lap, n_laps + 1):
-        for s, cache in zip(states, caches):
-            apply_race_event(s, setup, ctx, scenario, lap, react_to_neutralisation=react_sc,
-                             react_to_rain=react_rain, gain_cache=cache)
-        outcomes = [simulate_lap(s, setup, ctx, scenario, r, lap) for s, r in zip(states, rand)]
-        extras = _dirty_air_adjustment(states, outcomes, setup) if multi else [None] * len(states)
-        for s, o, ex in zip(states, outcomes, extras):
-            if hist is not None:
-                h = hist[s.car.car_id]
-                h["fuel_kg"].append(o.fuel_before_kg.copy())
-                h["tyre_age_laps"].append(o.tyre_age_before.copy())
-                h["compound_idx"].append(o.compound_before.copy())
-                h["status"].append(o.status.copy())
-                h["lap_time_s"].append(o.lap_time_s + (0 if ex is None else ex))
-                h["pit_time_s"].append(o.pit_cost_s)
-            update_race_state(s, o, ctx, ex)
-        if multi:
-            st = scenario.track_status[:, lap - 1]
-            nxt = scenario.track_status[:, lap] if lap < n_laps else np.zeros(n, dtype=np.int8)
-            ending = (st == TrackStatus.SAFETY_CAR) & (nxt != TrackStatus.SAFETY_CAR)
-            if np.any(ending):
-                _apply_safety_car_bunching(states, setup, ending)
-        if hist is not None:
-            for s in states:
-                hist[s.car.car_id]["elapsed_s"].append(s.elapsed_s - s.car.start_offset_s)
+        advance_lap(setup, ctx, scenario, states, rand, lap, react_to_neutralisation=react_sc, react_to_rain=react_rain,
+                    gain_caches=caches, interactions=multi, history=hist)
     results = calculate_final_result(states)
     history = None
     if hist is not None:

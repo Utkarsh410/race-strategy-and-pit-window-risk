@@ -17,6 +17,7 @@ simulation to put numbers on the risk.
 
 1. [Features](#features)
 2. [Architecture](#architecture)
+2a. [v2: predictive strategy and race adaptation](#v2-predictive-strategy-and-race-adaptation)
 3. [Installation](#installation)
 4. [Quick start](#quick-start)
 5. [Command-line usage](#command-line-usage)
@@ -51,6 +52,11 @@ simulation to put numbers on the risk.
 | Sensitivity | Degradation, pit loss, SC probability, lap variability; detects when the recommendation changes |
 | Validation | Stint-level or driver-level held-out validation of linear vs nonlinear tyre models (MAE, RMSE, bias) |
 | Outputs | Streamlit dashboard, Plotly charts, CSV export, self-contained HTML report |
+| **v2** Dynamic replanning | Rolling-horizon engine: observes the race each lap, re-optimises the remaining race on relevant changes, compares expected time and CVaR, recommends box/extend |
+| **v2** Decision log | Structured record of every recommendation (state, alternatives, risk, factors, version, seed, config hash), CSV/JSON/HTML export |
+| **v2** Historical validation | Evidence classification (synthetic / historical / unlabelled / mixed), stint-split leakage check, prediction-interval coverage, residual diagnostics, tyre calibration |
+| **v2** Track position | Gap evolution with causes, pit rejoin and traffic exposure, named rival responses, safety-car position changes |
+| **v2** Uncertainty | Confidence intervals for probabilities and means, convergence diagnostics, CVaR stability, per-source breakdown incl. rival behaviour, simulation precision vs model uncertainty |
 
 ## Architecture
 
@@ -82,11 +88,15 @@ race-strategy-and-pit-window-risk/
 │   ├── risk_metrics.py        risk metrics and objective comparison
 │   ├── sensitivity.py         sensitivity analysis
 │   ├── validation.py          model calibration and held-out validation
-│   ├── workflow.py            end-to-end analysis shared by CLI, report and dashboard
+│   ├── workflow.py            end-to-end analysis shared by CLI, report and dashboard (assemble_bundle)
+│   ├── replanning.py          v2: rolling-horizon decision engine + rolling race driver
+│   ├── decision_log.py        v2: structured decision records and export
+│   ├── uncertainty.py         v2: confidence intervals, convergence, tail stability, source breakdown
 │   ├── reporting.py           HTML report and CSV summaries
 │   └── plotting.py            Plotly figures
-├── dashboard/                 one module per dashboard section + shared state/caching
-├── scripts/                   generate_demo_data.py, run_simulation.py
+├── dashboard/                 one module per dashboard section (A-H) + shared state/caching
+├── docs/V2_AUDIT.md           repository audit made before the v2 changes
+├── scripts/                   generate_demo_data.py, run_simulation.py, replan_race.py, validate_model.py
 ├── tests/                     pytest suite
 └── outputs/                   generated CSV and HTML (git-ignored)
 ```
@@ -103,6 +113,149 @@ Design rules:
 * **No global state.** Random numbers come from `numpy.random.SeedSequence`
   streams named by `(seed, batch, stream, car)`. Configuration objects are frozen.
 * The dashboard only calls into `racesim`. It contains no model logic.
+
+## v2: predictive strategy and race adaptation
+
+v2 extends the v1 engine without replacing it. The v1 conventions are unchanged:
+the pit-loss accounting (lane loss excludes stationary time, cost booked once on
+the in-lap) and the single shared lap-time model. The only change to the engine
+is that `race_simulator.run_race` now calls a public `advance_lap` for each lap,
+so a controller can step the same engine one lap at a time. With all v2 options
+left at their defaults, seed-42 results are identical to v1. `docs/V2_AUDIT.md`
+records the pre-change audit.
+
+### Dynamic replanning workflow (`racesim.replanning`)
+
+1. **Observe.** At the end of each lap an `ObservedRaceState` captures elapsed
+   time, tyre compound, age and wear-equivalent age, fuel, completed stops and
+   compounds, the remaining plan, race control (and how many neutralised laps
+   have run), wetness and rain, and every rival's gap, tyres and stops.
+2. **Trigger.** `detect_triggers` compares the observation with the previous
+   prediction. It fires on an SC/VSC start or end, rain starting or stopping, a
+   wetness change, a rival pitting, gap/elapsed/fuel deviations beyond
+   thresholds, a mismatch between completed stops and the plan, a planned stop
+   coming close, or a periodic check. With no trigger the plan is carried forward
+   unchanged (a **no-op**, still logged).
+3. **Generate.** `find_optimal_strategy` runs from a `RaceSnapshot`, so only laps
+   *after* the current one are optimised. The shortlist is: the deterministic
+   optimum, the best plan for each stop count, the best plan for each next-pit lap
+   in the horizon, the current plan, and wet-tyre plans when the track is wet (or
+   plans back to slicks when on wets).
+4. **Evaluate.** Every candidate goes through the shared engine (`run_race`) from
+   the *exact* observed state: elapsed time as the start offset, observed fuel
+   and tyre wear, and the last track status (so the restart loss applies). Known
+   race control and weather are projected forward, and rivals are re-estimated
+   (prior plan shifted by observed stops, pace re-estimated from recent laps
+   using the same model). An optional Monte Carlo over the remaining laps (common
+   random numbers, remaining SC length sampled) adds expected time, CVaR95 and
+   P(ahead of all rivals).
+5. **Decide.** `score = mean + risk_aversion × (CVaR95 − mean)`. The current plan
+   is kept unless an alternative beats it by more than
+   `plan_change_threshold_s` (hysteresis). The action is `BOX_THIS_LAP`,
+   `STAY_OUT` (with the recommended pit lap), `NO_FURTHER_STOP` or
+   `NO_FEASIBLE_STRATEGY`.
+6. **Log.** A `DecisionRecord` is appended to the `DecisionLog` (see below).
+
+`run_rolling_race` runs a deterministic simulated race with the engine in the
+loop. It reports the race time, the static-plan time and the v1 reactive-heuristic
+time on the same race. Example (default configuration, seed 42, `--sims 0`):
+
+| Scenario | Replanning | Static plan | v1 reactive heuristic |
+|---|---|---|---|
+| Safety car laps 18–21 | 6,297.6 s (pit L19 under SC, L39), P1 | 6,331.7 s, P3 | 6,321.0 s |
+| Rain laps 30–41 (peak 0.8) | 6,404.6 s (intermediates laps 35–50), P1 | 6,525.3 s, P2 | 6,412.9 s |
+| Rain laps 30–41 + Rival A stopping 6 laps early, `--sims 200 --risk-aversion 0.3` | 6,466.7 s (full wets laps 38–45), P1 | 6,529.3 s, P2 | **6,411.3 s** |
+
+These races use the same model as the engine, so they show that the decision
+logic works. They are **not** evidence of benefit in a real race. The third row
+shows the engine is not always best. It plans using its *configured* forecast of
+rain duration and intensity (`weather.rain_duration_laps`, `peak_wetness`). When
+the real rain differs, a simple rule that reacts to the current wetness, like the
+v1 heuristic, can do better.
+
+Configuration lives in the `replanning:` section of `default_race.yaml`: Monte
+Carlo runs per option, risk aversion, horizon, trigger thresholds, rival-update
+weight, overdue-stop assumption and the plan-change threshold.
+
+### Decision logs (`racesim.decision_log`)
+
+Each record has: decision id, lap, **simulated race clock** (own elapsed seconds)
+and wall-clock UTC time, the full observed race state, action, recommended pit
+lap and strategy, the full race plan (completed + future stops), whether it was
+re-optimised, triggers, every alternative with deterministic/expected/CVaR
+remaining time and deltas, P(faster than recommended), P(ahead of all rivals),
+the expected difference versus the current plan, a risk comparison, influencing
+factors, warnings, model version, random seed, configuration hash, Monte Carlo
+count and risk aversion.
+
+Influencing factors are generated only from computed values: triggers,
+configured pit losses, tyre age, fuel margin, the next-best option's delta,
+hysteresis and rival probabilities. `DecisionLog.export_csv` writes
+`decision_log.csv` and `decision_log_alternatives.csv`; `export_json` and
+`to_html` are also available.
+
+### Historical-data validation (`racesim.validation`)
+
+* `load_historical_csv` records provenance (SHA-256, rows, labels). It never
+  invents a `data_source`: unlabelled files become `UNLABELLED` unless you pass
+  `--data-label`.
+* `classify_evidence` returns one of four results:
+  * `synthetic_self_consistency`: checks code and parameter recovery only.
+  * `historical_out_of_sample`: data labelled as non-synthetic.
+  * `unlabelled`: provenance unverified, so not reported as historical evidence.
+  * `mixed`: split by label and validated separately, never pooled.
+* Splits hold out whole **stints** (or drivers). `check_split_leakage` confirms
+  that no stint appears in both sets. If leakage were found, metrics would be
+  withheld.
+* Metrics: MAE, RMSE, mean bias (predicted − observed), sample counts, and
+  **prediction-interval coverage**. The interval is an empirical interval from
+  training residuals; its held-out coverage is *measured*, not assumed. On the
+  synthetic demo it is 81% for a nominal 90%.
+* `analyse_residuals` gives residuals by compound, tyre-age band and driver, the
+  residual-versus-age slope, and within-stint lag-1 autocorrelation.
+* `calibrate_tyre_model` compares fitted and configured degradation with 95% CIs.
+  Overrides are only *recommended* for reliable estimates; the dashboard applies
+  them only when you click.
+* With too little data the status is `inconclusive` and no figures are shown.
+  **No historical race data are bundled** with the project.
+
+### Rival and track-position improvements (`racesim.rival_model`)
+
+These use the simplified elapsed-time model. There is no claim of precise
+overtaking prediction, and all thresholds are configurable under `traffic:` and
+`race_control:`.
+
+* `gap_evolution`: lap-by-lap gap, plus the pit stop, dirty-air or SC-bunching
+  term that moved it.
+* `predict_pit_rejoin`: position at rejoin, gaps to the cars ahead and behind,
+  cars within `rejoin_traffic_window_s`, and dirty-air time lost over the next
+  `traffic_exposure_laps` laps.
+* `compare_pit_lap_rejoins`: the same, for alternative laps of one stop.
+* `rival_response_scenarios`: outcome of an own pit call when the rival covers,
+  pits as planned, or extends.
+* `safety_car_position_changes`: order and gaps before the SC, after bunching
+  and at the finish, versus a green race.
+* Optional **rival-behaviour uncertainty** in Monte Carlo
+  (`monte_carlo.include_rival_uncertainty`, off by default): a random rival pace
+  offset plus a shift of its pit laps.
+
+### Uncertainty and risk (`racesim.uncertainty`)
+
+* **Simulation precision**: standard errors and 95% CIs for means, Wilson
+  intervals for probabilities (P(beat baseline), P(beat rivals)), bootstrap CIs
+  for CVaR95, and convergence diagnostics with explicit pass/fail criteria (mean,
+  CVaR, probability, paired difference).
+* **Tail stability**: runs in the 5% tail, bootstrap CI width and split-half
+  agreement.
+* **Source breakdown**: one Monte Carlo per source (lap noise, tyre/pace/fuel
+  parameters, pit stops, race events + traffic, rival behaviour). It reports the
+  spread of the absolute race time *and* of the paired difference to the
+  baseline. Lap noise cancels exactly in paired comparisons (common random
+  numbers), and safety cars widen absolute times far more than they change the
+  decision.
+* **Model uncertainty** is reported separately and explicitly: more simulations
+  do not make predictions accurate for a real race.
+* `RiskReport` gains optional CI fields. They are filled only when computed.
 
 ## Installation
 
@@ -185,6 +338,39 @@ The command writes the following to `outputs/`:
 | `risk_metrics.csv` | Risk report for each strategy |
 | `race_strategy_report.html` | Self-contained HTML report that opens offline |
 
+v2 options for `run_simulation.py`:
+
+| Option | Effect |
+|---|---|
+| `--replan` | run the rolling-horizon replanning demonstration (adds report section 11, `decision_log*.csv`, `replanning_laps.csv`) |
+| `--sc-lap N --sc-laps K` | safety car in that race |
+| `--rain-lap N --rain-laps K --rain-severity W` | rain in that race |
+| `--replan-sims N` | Monte Carlo runs per option per decision (0 = deterministic) |
+| `--risk-aversion L` | weight on CVaR95 in the decision score |
+| `--decision-log PATH` | where to write the decision log CSV |
+| `--validate-data PATH [--data-label LABEL]` | held-out validation and calibration (report section 12, `validation_metrics.csv`, `tyre_calibration.csv`) |
+| `--uncertainty-breakdown` | per-source spread (`uncertainty_breakdown.csv`) |
+
+`precision.csv` and `convergence.csv` are always written when Monte Carlo runs.
+
+Dedicated scripts:
+
+```bash
+python scripts/replan_race.py --sc-lap 18 --sims 0
+```
+
+```bash
+python scripts/replan_race.py --rain-lap 30 --rain-laps 12 --rival-shift RIVAL_1:-6 --sims 200 --risk-aversion 0.3
+```
+
+```bash
+python scripts/validate_model.py --data data/synthetic/synthetic_demo_race.csv
+```
+
+```bash
+python scripts/run_simulation.py --sims 10000 --replan --sc-lap 18 --validate-data data/synthetic/synthetic_demo_race.csv --uncertainty-breakdown
+```
+
 Use `--no-rivals` and `--no-sensitivity` to make the run faster. On the
 development laptop, 10,000 runs × 5 strategies × 3 cars plus the sensitivity
 sweeps finished in about 8 s.
@@ -198,8 +384,8 @@ Environment variables (see `.env.example`): `RACESIM_RACE_CONFIG`,
 streamlit run app.py
 ```
 
-The dashboard opens at <http://localhost:8501>. It has six sections, and they all
-share one model. A model assumption changed in any section applies to every
+The dashboard opens at <http://localhost:8501>. It has eight sections (A–F from
+v1, G–H added in v2), and they all share one model. A model assumption changed in any section applies to every
 analysis.
 
 | Section | Contents |
@@ -209,7 +395,13 @@ analysis.
 | **C. Pit window** | Earliest, recommended and latest lap; cost-by-lap curve with the whole window shaded and the recommended lap marked separately; optional SC/VSC scenario curve; model tyre curves overlaid with observed fuel-corrected laps; safety-car scenario comparison |
 | **D. Monte Carlo risk** | Simulation count, lap variability, degradation uncertainty, pit variability, SC/VSC probability, switches for each uncertainty source, rivals on or off; **Run** button with a progress bar; histogram, CDF, paired difference to baseline, percentile and CVaR metrics, objective comparison, low-count warnings, CSV and HTML report downloads. The random seed is set in the sidebar. |
 | **E. Rival strategy** | Whole-race gaps and predicted positions against the configured rivals; undercut/overcut evaluator (gap, compounds, tyre ages, rival pace, pit laps); predicted rival pit window; rejoin position; sensitivity to the rival's response lap; the simplifying assumptions are shown |
-| **F. Telemetry & validation** | CSV upload or synthetic data; data-quality report with flagged records; lap-time progression with SC/VSC shading; sector comparison; stint pace; degradation estimates against the configured model; pace trend; fuel consumption; held-out validation (MAE, RMSE, bias, predicted vs observed, residuals) |
+| **F. Telemetry & validation** | CSV upload or synthetic data; data-quality report with flagged records; lap-time progression with SC/VSC shading; sector comparison; stint pace; degradation estimates against the configured model; pace trend; fuel consumption; held-out validation (MAE, RMSE, bias, predicted vs observed, residuals). **v2:** evidence type with an explicit headline, leakage check, prediction-interval coverage, residual diagnostics, calibration table with an *Apply* button |
+| **G. Dynamic replanning** (v2) | Initial plan, safety car, rain and an off-plan rival; Monte Carlo runs per decision and risk aversion; **Run** button; replanning vs static vs v1 heuristic; timeline with pits, neutralisations and re-optimisation points; decision log (filterable) with alternatives, influencing factors and observed state for each decision; CSV downloads |
+| **H. Sensitivity & uncertainty** (v2) | Simulation precision table, convergence chart and criteria, CVaR stability (from the Section D run); uncertainty breakdown by source (**Run**); sensitivity sweeps and ranking (**Run**); model-uncertainty statements |
+
+v2 also adds to existing sections: D shows Wilson CIs, the Monte Carlo standard
+error and a rival-behaviour switch; E shows gap evolution, rejoin and traffic
+exposure for the first stop, SC position changes and named rival responses.
 
 Behaviour notes:
 
@@ -220,6 +412,10 @@ Behaviour notes:
 * Uploaded data and calculated results are kept separate.
 * Analyses that need missing columns (for example sectors or tyre data) are
   switched off with an explanation instead of failing.
+* The HTML report (Section D → *Build HTML report*) goes through the shared
+  `workflow.assemble_bundle`. It contains Monte Carlo, sensitivity, uncertainty
+  breakdown, replanning and validation **only if they were run in the session
+  with the current settings**. Everything else is labelled *not run*.
 
 ## CSV schema
 
@@ -409,7 +605,7 @@ With coverage:
 pytest --cov=racesim --cov-report=term
 ```
 
-The suite has 110 tests. It covers configuration validation, data loading and
+The suite has 156 tests: the 110 from v1, unchanged, plus 46 for v2. The v1 tests It covers configuration validation, data loading and
 validation, tyre/fuel/pit models, the pit window (with a hand-calculated optimum
 that is not the midpoint), strategy generation limits, the optimiser
 (known-optimum case, agreement with the simulator), race-simulation time
@@ -418,8 +614,31 @@ Carlo reproducibility and batching, hand-calculated risk metrics and CVaR, plots
 with empty inputs, and an end-to-end integration test (synthetic data → optimiser
 → simulator → Monte Carlo → risk report → CSV → HTML).
 
-The dashboard can be smoke-tested headlessly with Streamlit's `AppTest`, which was
-used during development. It is not part of the pytest suite.
+The v2 tests cover:
+
+* **Replanning** (`test_replanning.py`): after a safety car, rain and a rival pit
+  stop; no-op on an unchanged state; infeasible remaining strategies;
+  preservation of elapsed time and completed stops; consistency of the shared
+  model with `simulate_race`; reproducible Monte Carlo decisions; the risk-aversion
+  score.
+* **Decision log** (`test_decision_log.py`): fields, CSV/JSON/HTML export, and
+  factors that reference computed alternatives.
+* **Historical validation** (`test_historical_validation.py`): evidence
+  classification, no stint leakage, metrics and coverage, inconclusive results,
+  incomplete fields, keeping synthetic and historical separate, calibration,
+  provenance.
+* **Rivals** (`test_rival_v2.py`): gap accounting against independent runs, gap
+  reconciliation with interactions, hand-calculated rejoin, traffic exposure,
+  responses, SC position changes.
+* **Uncertainty** (`test_uncertainty.py`): Wilson values, CIs in risk reports,
+  convergence, tail stability, common-random-number noise reduction, source
+  separation, rival-behaviour reproducibility.
+* **Reports** (`test_reporting_v2.py`): reports contain exactly the analyses run,
+  well-formed HTML, valid CSV fields, equivalent assumptions across strategies.
+* **Dashboard** (`test_dashboard.py`): headless `AppTest` covering all 8 tabs,
+  Monte Carlo + sensitivity + replanning → report contents, and the calibration
+  apply button. These take about 20 s. Skip them with
+  `pytest --deselect tests/test_dashboard.py`.
 
 ## Limitations
 
@@ -434,10 +653,32 @@ used during development. It is not part of the pytest suite.
 * The SC/VSC hazard is constant per lap. There are no red flags, lapped-car
   procedures or pit-lane closures. Weather is a simple wetness index with
   illustrative compound crossovers.
-* Reactive decisions cover pitting under SC/VSC and switching tyres for rain. Other
-  in-race re-optimisation (for example responding to a rival's stop) happens only
-  in the rival analysis.
-* The optimiser maximises expected race time. Other objectives are compared from
+* The v1 reactive rules cover pitting under SC/VSC and switching tyres for rain.
+  The v2 replanning engine re-optimises the remaining race on any trigger,
+  including rival stops. It is demonstrated only on deterministic simulated races
+  that use the engine's own model, so its benefit in a real race is unvalidated.
+* Replanning assumptions: the remaining SC/VSC length (sampled from the configured
+  range in Monte Carlo, the mean in deterministic mode) and the remaining rain
+  duration are taken from configuration. Rival plans are priors adjusted by
+  observed stops. In deterministic mode, near-equal options can still switch on
+  periodic checks when dirty-air effects differ by more than the hysteresis
+  threshold.
+* The engine is only as good as its forecasts of rain duration/intensity and SC
+  length. In one tested rain case it finished 55 s behind the v1 reactive
+  heuristic, although it still beat the static plan. Plan-change hysteresis
+  (default 0.5 s) avoids flip-flopping but can delay a switch by a lap; in the
+  deterministic rain example that cost about 10 s.
+* Candidate plans come from the green-flag optimiser (plus wet-tyre plans). Plans
+  that are only good under the projected conditions but poor under green flag may
+  be missed.
+* Validation: no historical data are bundled. Prediction intervals come from
+  in-sample residuals, so held-out coverage can fall short of nominal (as measured
+  on the demo data). Driver offsets for drivers missing from the training data are
+  assumed to be 0.
+* Confidence intervals and convergence checks describe Monte Carlo precision only.
+  The paired-difference intervals are tight because of common random numbers;
+  that does not reduce model error.
+* The optimiser minimises expected race time. Other objectives are compared from
   Monte Carlo results but are not optimised directly.
 * Monte Carlo results are reproducible for the same seed, run count, **batch size**
   and configuration.
@@ -456,7 +697,8 @@ are no placeholder integrations:
 * dynamic-programming optimisation over the existing stint-cost tables
 * richer traffic and opponent modelling with track position
 * position- and championship-points objectives (pluggable `objective` in the optimiser)
-* race-engineer decision logs
+* richer decision logs (race-engineer annotations, decision outcomes compared with what happened)
+* closed-loop Monte Carlo with the replanning engine in every simulated race (currently deterministic examples only)
 
 ## License
 
