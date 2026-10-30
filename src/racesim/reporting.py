@@ -342,3 +342,38 @@ def export_race_summary(result: SimulationResult | Iterable[SimulationResult], p
     p.parent.mkdir(parents=True, exist_ok=True)
     pd.concat(frames, ignore_index=True).to_csv(p, index=False)
     return p
+
+
+def generate_live_session_report(snapshots: Iterable[dict], path: Optional[str | Path] = None) -> str:
+    """Post-session summary of ACC telemetry analysis, one section per session (from ``LiveAnalysis.snapshot``)."""
+    parts = []
+    for snap in snapshots:
+        if not snap.get("available"):
+            continue
+        pace = snap["pace"]
+        stats = [{"statistic": name, "value_s": pace[name]["value"], "valid_laps": pace[name]["n"]} for name in ("best", "mean", "median", "std")]
+        stats += [{"statistic": f"rolling {w}", "value_s": r["value"], "valid_laps": r["n"]} for w, r in pace["rolling"].items()]
+        source = "MOCK data - not ACC" if snap.get("mock") else "Recorded ACC telemetry"
+        parts.append(
+            f"<h2>Session {_esc(snap['session_key'])}</h2><p class='banner'>{_esc(source)}. Lap times are measured; classifications and "
+            "statistics are derived from telemetry.</p>"
+            + _kv({r["channel"]: "UNAVAILABLE" if r["value"] is None else f"{r['value']} {r['unit']}".strip() for r in snap["overview"]})
+            + "<h3>Pace (clean-lap candidates only)</h3>" + _table(pd.DataFrame(stats))
+            + f"<p class='muted'>{_esc(pace['trend_note'])}</p>"
+            + "<h3>Laps</h3>" + _table(pd.DataFrame(snap["laps"]), max_rows=500)
+            + "<h3>Stints</h3>" + _table(pd.DataFrame(snap["stints"]))
+            + "<h3>Stint pace</h3>" + _table(pd.DataFrame(pace["stints"]))
+            + "<h3>Pit transitions</h3>" + _table(pd.DataFrame(snap["transitions"]))
+            + "<h3>Channels not supplied</h3>" + _table(pd.DataFrame(snap["missing_channels"]))
+            + "<h3>Data-quality flags</h3>" + _kv(snap["flags"] or {"none": 0})
+            + ("<h3>Strategy snapshots (MODEL PREDICTION)</h3>" + _table(pd.DataFrame(
+                [{k: s.get(k) for k in ("status", "laps_completed_at_run", "recommended_pit_lap", "pit_window")} for s in snap["strategy_snapshots"]]))
+               if snap["strategy_snapshots"] else ""))
+    body = "".join(parts) or "<p class='muted'>No telemetry sessions were recorded.</p>"
+    doc = (f"<!doctype html><html><head><meta charset='utf-8'><title>ACC session summary</title><style>{_CSS}</style></head>"
+           f"<body><main><h1>ACC session summary</h1>{body}</main></body></html>")
+    if path is not None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "x", encoding="utf-8") as fh:
+            fh.write(doc)
+    return doc

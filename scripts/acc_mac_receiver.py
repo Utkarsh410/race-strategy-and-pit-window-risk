@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from racesim.integrations.acc.auth import load_secret  # noqa: E402
 from racesim.integrations.acc.config import load_acc_config  # noqa: E402
 from racesim.integrations.acc.receiver import ReceiverBindError, TelemetryReceiver  # noqa: E402
+from racesim.integrations.acc.live_analysis import LiveAnalysis, write_session_exports  # noqa: E402
 from racesim.integrations.acc.session_logger import SessionLogger, export_session_csv  # noqa: E402
 
 
@@ -63,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     rx = TelemetryReceiver(host, port, secret=secret, require_auth=secret is not None, thresholds=cfg.health,
                            session_logger=session_logger, max_bytes=rc.max_datagram_bytes,
                            allowed_sender_ips=rc.allowed_sender_ips, history_size=rc.history_size)
+    analysis = LiveAnalysis(thresholds=cfg.health, sink=session_logger)
+    rx.add_listener(analysis.on_message)
     try:
         rx.start()
     except ReceiverBindError as exc:
@@ -87,9 +90,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.duration is not None and time.monotonic() - t0 >= args.duration:
                 break
     finally:
+        analysis.finish()
         rx.stop()
         if session_logger is not None and session_logger.path is not None:
             log.info("Session log written: %s (%d records)", session_logger.path, session_logger.records_written)
+            for kind, path in write_session_exports(analysis, session_logger.path.with_suffix("")).items():
+                log.info("Session %s: %s", kind, path)
             if args.csv:
                 log.info("CSV export: %s", export_session_csv(session_logger.path, session_logger.path.with_suffix(".csv")))
     return 0

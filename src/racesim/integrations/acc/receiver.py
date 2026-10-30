@@ -19,7 +19,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from pydantic import ValidationError
 
@@ -99,6 +99,13 @@ class TelemetryReceiver:
         self.history: deque = deque(maxlen=history_size)
         self.events: deque = deque(maxlen=200)
         self.bound_address: Optional[tuple[str, int]] = None
+        self._listeners: list[Callable[..., None]] = []
+        self.listener_errors = 0
+
+    def add_listener(self, listener: Callable[..., None]) -> None:
+        """Call ``listener(message_type, payload, status, received_t, received_utc, mock)`` on the receiver
+        thread for every accepted message. A failing listener is logged and never stops the receiver."""
+        self._listeners.append(listener)
 
     # -- lifecycle --------------------------------------------------------------
     def start(self) -> "TelemetryReceiver":
@@ -194,6 +201,12 @@ class TelemetryReceiver:
                                  "mock": env.mock, "status": status, "payload": p})
         if self.session_logger is not None:
             self.session_logger.log(env.model_dump(mode="json"), received_at_utc=received_utc, quality=quality)
+        for listener in self._listeners:
+            try:
+                listener(env.message_type, p, status, now, received_utc, env.mock)
+            except Exception:
+                self.listener_errors += 1
+                logger.exception("Telemetry listener failed")
         return "accepted" if status == "new" else status
 
     # -- read interface ---------------------------------------------------------

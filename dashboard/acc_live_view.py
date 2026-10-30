@@ -25,6 +25,7 @@ from racesim.config import PROJECT_ROOT
 from racesim.integrations.acc.auth import load_secret
 from racesim.integrations.acc.config import load_acc_config
 from racesim.integrations.acc.health import HealthState
+from racesim.integrations.acc.live_analysis import LiveAnalysis, write_session_exports
 from racesim.integrations.acc.receiver import ReceiverBindError, TelemetryReceiver
 from racesim.integrations.acc.session_logger import SessionLogger, flatten_record, read_session_log
 from racesim.integrations.acc.state_builder import MOCK, STALE, channel_table
@@ -41,6 +42,8 @@ class ReceiverManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.receiver: Optional[TelemetryReceiver] = None
+        self.analysis: Optional[LiveAnalysis] = None
+        self.exports: dict[str, Path] = {}
         self.error: Optional[str] = None
 
     def start(self, host: str, port: int, *, secret: Optional[bytes], log_dir: Optional[Path], cfg) -> None:
@@ -56,16 +59,23 @@ class ReceiverManager:
             rx = TelemetryReceiver(host, port, secret=secret, require_auth=secret is not None, thresholds=cfg.health,
                                    session_logger=logger, max_bytes=cfg.mac_receiver.max_datagram_bytes,
                                    allowed_sender_ips=cfg.mac_receiver.allowed_sender_ips, history_size=cfg.mac_receiver.history_size)
+            analysis = LiveAnalysis(thresholds=cfg.health, sink=logger)
+            rx.add_listener(analysis.on_message)
             try:
                 rx.start()
-                self.receiver, self.error = rx, None
+                self.receiver, self.analysis, self.error, self.exports = rx, analysis, None, {}
             except ReceiverBindError as exc:
                 self.error = f"{exc}. Is scripts/acc_mac_receiver.py (or another dashboard) already listening on this port?"
 
     def stop(self) -> None:
         with self._lock:
             if self.receiver is not None:
+                if self.analysis is not None:
+                    self.analysis.finish()
                 self.receiver.stop()
+                log = self.receiver.session_logger
+                if self.analysis is not None and log is not None and log.path is not None and not self.exports:
+                    self.exports = write_session_exports(self.analysis, log.path.with_suffix(""))
 
 
 @st.cache_resource
@@ -236,7 +246,8 @@ def render_replay() -> None:
 def render() -> None:
     st.title("ACC Live Telemetry")
     st.caption("Read-only telemetry from Assetto Corsa Competizione via the Windows UDP bridge. Phase 1: connection and "
-               "validation only - this page does not feed the strategy engine. Setup: docs/ACC_LIVE_TELEMETRY_SETUP.md.")
+               "validation only - this page does not feed the strategy engine; lap, stint and strategy analysis are on the "
+               "ACC Performance page. Setup: docs/ACC_LIVE_TELEMETRY_SETUP.md.")
     cfg, cfg_err = _config()
     if cfg_err:
         st.warning(cfg_err)

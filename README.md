@@ -100,6 +100,7 @@ race-strategy-and-pit-window-risk/
 ├── docs/V2_AUDIT.md           repository audit made before the v2 changes
 ├── docs/ACC_LIVE_TELEMETRY_SETUP.md   Windows + macOS setup for live ACC telemetry
 ├── pages/1_ACC_Live_Telemetry.py      Streamlit page for the live ACC receiver
+├── pages/2_ACC_Performance.py         Live lap, stint, pace, fuel/tyre and strategy analysis
 ├── scripts/                   generate_demo_data.py, run_simulation.py, replan_race.py, validate_model.py
 ├── tests/                     pytest suite
 └── outputs/                   generated CSV and HTML (git-ignored)
@@ -263,10 +264,11 @@ overtaking prediction, and all thresholds are configurable under `traffic:` and
 
 ## ACC live telemetry (optional)
 
-Phase 1 adds a **read-only** connection from Assetto Corsa Competizione on a
-Windows PC to RaceSim on a Mac. It covers connecting, validating, monitoring
-health and logging. It does **not** feed the strategy engine, and RaceSim works
-exactly as before without ACC.
+A **read-only** connection from Assetto Corsa Competizione on a Windows PC to
+RaceSim on a Mac. It covers connecting, validating, monitoring health and logging,
+and the *ACC Performance* page adds live lap, stint and pace analysis plus
+on-demand strategy analysis. RaceSim works exactly as before without ACC, and the
+synthetic mode is unchanged.
 
 * **Windows bridge** (`scripts/acc_windows_bridge.py`): registers with ACC's
   UDP broadcasting API (protocol v4, connection password, empty command
@@ -289,11 +291,11 @@ exactly as before without ACC.
   code copied) and
   [geniusdex/broawp](https://pkg.go.dev/github.com/geniusdex/broawp/accbroadcast)
   (BSD-3-Clause). The reference is the C# SDK shipped in the game's
-  `sdk\broadcasting` folder. The track-data request layout and the meaning of
-  `sessionEndTime` are unverified, and documented as such.
+  `sdk\broadcasting` folder.
 * **Limits:** the UDP broadcasting API has no physics channels (fuel, tyres,
-  pedals). Live operation has **not** been verified against a running game yet;
-  the tests use hand-built protocol fixtures and a fake ACC endpoint.
+  pedals), so those stay UNAVAILABLE until a Windows shared-memory reader exists,
+  and pit recommendations stay disabled. Real-session evidence so far is practice
+  at one track; the tests use deterministic synthetic fixtures.
 
 Setup, the network checklist and the first-session test are in
 [docs/ACC_LIVE_TELEMETRY_SETUP.md](docs/ACC_LIVE_TELEMETRY_SETUP.md).
@@ -646,7 +648,7 @@ With coverage:
 pytest --cov=racesim --cov-report=term
 ```
 
-The suite has 199 tests: the 110 from v1, unchanged, 46 for v2 and 43 for the
+The suite has 312 tests: the 110 from v1, unchanged, 46 for v2 and 156 for the
 ACC integration (`tests/integrations/acc/`). The v1 tests It covers configuration validation, data loading and
 validation, tyre/fuel/pit models, the pit window (with a hand-calculated optimum
 that is not the midpoint), strategy generation limits, the optimiser

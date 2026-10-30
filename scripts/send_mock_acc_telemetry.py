@@ -30,11 +30,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--count", type=int, default=20)
     ap.add_argument("--interval", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--lap-samples", type=int, default=5, help="messages per simulated lap; use 30 or more for clean laps in ACC Performance")
     ap.add_argument("--secret-env", default="RACESIM_BRIDGE_SECRET")
     ap.add_argument("--insecure-no-auth", action="store_true")
     args = ap.parse_args(argv)
     secret = None if args.insecure_no_auth else load_secret(args.secret_env, required=True)
-    gen = MockTelemetryGenerator(seed=args.seed, lap_samples=5)
+    gen = MockTelemetryGenerator(seed=args.seed, lap_samples=args.lap_samples)
     tx = BridgeSender(args.host, args.port, secret=secret, sender_id="mock-sender", mock=True)
     t0 = time.monotonic()
     try:

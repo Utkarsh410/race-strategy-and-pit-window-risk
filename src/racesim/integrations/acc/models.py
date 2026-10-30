@@ -11,8 +11,8 @@ Native source of each field (UDP broadcasting API)
 session.track_name, track_length_m     TRACK_DATA.trackName / trackMeters
 session.session_type / session_phase   REALTIME_UPDATE.sessionType / sessionPhase
 session.session_time_elapsed_s         REALTIME_UPDATE.sessionTime (ms / 1000)
-session.session_end_time_raw_s         REALTIME_UPDATE.sessionEndTime (ms / 1000), meaning unverified
-session.session_time_remaining_s       not populated (meaning of sessionEndTime unverified)
+session.session_end_time_raw_s         REALTIME_UPDATE.sessionEndTime (ms / 1000)
+session.session_time_remaining_s       not populated by the bridge; the receiver derives it (race_state.SessionTimeRemaining)
 session.ambient/track_temperature_c    REALTIME_UPDATE.ambientTemp / trackTemp (integer degC)
 session.*_raw weather bytes            REALTIME_UPDATE.clouds / rainLevel / wetness (raw bytes)
 vehicle.car_id                         REALTIME_CAR_UPDATE.carIndex (focused car)
@@ -22,14 +22,21 @@ vehicle.laps_completed                 REALTIME_CAR_UPDATE.laps
 vehicle.current_lap                    DERIVED: laps_completed + 1
 vehicle.last/best/current_lap_time_s   REALTIME_CAR_UPDATE.lastLap / bestSessionLap / currentLap
 vehicle.current_sector                 DERIVED: completed splits in currentLap + 1 (only if splits present)
+vehicle.last_lap_splits_s              REALTIME_CAR_UPDATE.lastLap.splits (ms / 1000)
+vehicle.last_lap_is_out_lap / _in_lap  REALTIME_CAR_UPDATE.lastLap.isOutLap / isInLap
+vehicle.current_lap_is_invalid         REALTIME_CAR_UPDATE.currentLap.isInvalid
 vehicle.car_location, speed_kmh,       REALTIME_CAR_UPDATE.carLocation / kmh / splinePosition / delta
   spline_position, delta_s
 =====================================  ==============================================
 
-The broadcasting API does not provide physics channels (tyre temperatures,
-pressures, wear, fuel, throttle). Those fields exist only as reserved
-optional slots for a future Windows shared-memory reader and are always
-``None`` from ``acc_udp``.
+The broadcasting API does not provide physics channels (tyre compound, age,
+temperatures, pressures, wear, fuel, throttle). Those fields exist only as
+reserved optional slots for a future Windows shared-memory reader and are
+always ``None`` from ``acc_udp``.
+
+Fields added after the first release are optional, so logs and bridges without
+them stay valid. A receiver older than the bridge rejects them (``extra="forbid"``):
+update the Mac first, or both together.
 """
 
 from __future__ import annotations
@@ -98,6 +105,10 @@ class VehicleInfo(_Model):
     last_lap_valid: Optional[bool] = None
     current_sector: Optional[int] = Field(default=None, ge=1, le=16)
     current_lap_splits_s: Optional[list[Optional[float]]] = None
+    last_lap_splits_s: Optional[list[Optional[float]]] = None
+    last_lap_is_out_lap: Optional[bool] = None
+    last_lap_is_in_lap: Optional[bool] = None
+    current_lap_is_invalid: Optional[bool] = None
     car_location: Optional[str] = Field(default=None, max_length=32)
     speed_kmh: Optional[int] = Field(default=None, ge=0, le=600)
     spline_position: Optional[float] = Field(default=None, ge=0, le=1.0)
@@ -106,6 +117,10 @@ class VehicleInfo(_Model):
     # Reserved for a future shared-memory source; never populated by acc_udp.
     fuel_kg: Optional[float] = Field(default=None, ge=0, le=500)
     tyre_wear: Optional[list[float]] = None
+    tyre_compound: Optional[str] = Field(default=None, max_length=32)
+    tyre_age_laps: Optional[int] = Field(default=None, ge=0, le=10_000)
+    tyre_pressures_psi: Optional[list[float]] = None      # FL, FR, RL, RR
+    tyre_temperatures_c: Optional[list[float]] = None     # FL, FR, RL, RR
 
 
 class ConnectionInfo(_Model):

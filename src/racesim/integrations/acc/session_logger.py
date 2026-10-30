@@ -88,6 +88,14 @@ class SessionLogger:
             if self._pending >= self.flush_every or time.monotonic() - self._last_flush >= self.flush_interval:
                 self.flush()
 
+    def log_record(self, record_type: str, data: dict[str, Any]) -> None:
+        """Append a derived record (completed lap, stint, session metadata, strategy snapshot, ...)."""
+        with self._lock:
+            if self._fh is None:
+                return
+            self._write({"record_type": record_type, "logged_at_utc": datetime.now(timezone.utc).isoformat(), "data": data})
+            self.flush()
+
     def flush(self) -> None:
         if self._fh is not None:
             self._fh.flush()

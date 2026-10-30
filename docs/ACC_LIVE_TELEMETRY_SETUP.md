@@ -1,8 +1,10 @@
 # ACC live telemetry: setup and first-session test
 
 RaceSim can receive **read-only** live timing data from Assetto Corsa Competizione
-(ACC). This is phase 1: it establishes and validates the connection only. Nothing
-received here feeds the strategy engine yet.
+(ACC). The receiver validates the connection; the **ACC Performance** page analyses laps,
+stints and pace and runs strategy analysis on demand (see
+[Live performance analysis](#live-performance-analysis)). RaceSim only reads: it never
+sends commands to the game.
 
 ```
 Windows PC (Ethernet)                                      MacBook (Wi-Fi)
@@ -289,3 +291,90 @@ Mock data is always labelled MOCK and never shown as live ACC telemetry.
    `WAITING_FOR_DATA` or `STALE`.
 7. Keep both logs. If any value looks wrong, report it with the JSONL file; the
    `field_sources` entry says which native message each value came from.
+
+## Live performance analysis
+
+Open **ACC Performance** in the Streamlit sidebar. It shares the receiver with the *ACC Live
+Telemetry* page, so changing page or rerunning never starts a second one. To analyse a recorded
+log, choose *Replay* on that page or run:
+
+```bash
+python scripts/analyse_acc_session.py outputs/acc_sessions/acc_<stamp>_<id>.jsonl
+```
+
+**Update order.** The bridge now forwards extra optional fields, and an older receiver rejects
+them. Update the Mac first, or both together. A new receiver works with an old bridge, but
+sector times stay UNAVAILABLE until the Windows bridge is updated.
+
+### Behaviour measured on real ACC sessions
+
+These come from recorded sessions at Circuit Paul Ricard (practice, 15 minutes), not from the
+protocol documentation. Race, qualifying and multi-stint behaviour has not been recorded yet.
+
+| Observation | How RaceSim handles it |
+|---|---|
+| A session restart keeps the bridge's session id, and the session clock returns to 0 | The clock regression starts a new session; the bridge now issues a new id as well |
+| The out-lap crosses the line without changing `laps` or `lastLap` | Pit evidence comes from the lap's own time window, so the first timed lap is not called an out-lap |
+| `elapsed + sessionEndTime` stays at 900.0 during `SESSION` | Time remaining is DERIVED from it, only in `SESSION` and only while the sum stays stable |
+| In `PRE_FORMATION`, `sessionEndTime` falls while elapsed stays 0 | Time remaining is UNAVAILABLE in that phase |
+| Broadcasting events repeat many times | Events are de-duplicated and never count laps |
+| The lap timer keeps running across a restart | Lap times come from `lastLap`, never from the running timer |
+
+### Lap classification
+
+| Class | Meaning | In pace statistics |
+|---|---|---|
+| `CLEAN_CANDIDATE` | ACC says valid, on track throughout, telemetry covers the lap | Yes |
+| `INVALID` | ACC's `isInvalid` flag | No |
+| `INCOMPLETE` | No lap time could be established | No |
+| `OUT_LAP` / `IN_LAP` | Pit activity inside the lap's window, or ACC's flag | No |
+| `UNCERTAIN` | Evidence is missing: validity unknown, telemetry gap over 5 s, not green, race start lap, or over 7% from the median with no known cause | No |
+
+Slow laps are never discarded: they stay in every table and export. A pit visit starts a new stint
+but does not prove a tyre change, and leaving the garage at the start is not a stint change.
+
+### Channels and where they come from
+
+| Channel | Status |
+|---|---|
+| Track, session type and phase, position, laps, last and best lap, car location, speed, temperatures | LIVE MEASUREMENT over UDP |
+| Time remaining, current lap, stint number, consumption, lap classification | DERIVED FROM TELEMETRY |
+| Sector times | Needs the updated bridge. Accepted only if the sectors add up to the lap; the per-sector meaning is not yet confirmed on real data |
+| Out-lap and in-lap flags | Needs the updated bridge; not yet confirmed on real data |
+| Fuel, tyre compound, age, pressures, temperatures, wear | **UNAVAILABLE.** Not in the UDP broadcasting API; needs a future Windows shared-memory reader |
+
+The analysis code for fuel and tyres is in place and tested with fixtures. A shared-memory reader
+must run on Windows and forward `fuel_kg` in kilograms (ACC reports litres, so it must convert),
+`tyre_compound`, `tyre_age_laps`, `tyre_pressures_psi` and `tyre_temperatures_c`.
+
+### Strategy analysis
+
+Runs only when you press the button, never per packet. Unknown values stay blank and are never
+filled from the synthetic configuration.
+
+| Readiness | Meaning |
+|---|---|
+| `BLOCKED` | A required input is missing or the data are stale. The model does not run |
+| `SCENARIO_ONLY` | The model runs on stated assumptions. Candidates and windows appear, with no pit recommendation |
+| `RECOMMENDATION_ELIGIBLE` | Tyres and fuel measured, live `RACE` in `SESSION`, 5 or more clean laps, tyre model declared calibrated |
+
+Over UDP alone, fuel and tyres are not measured, so `RECOMMENDATION_ELIGIBLE` cannot be reached
+until a shared-memory reader exists. The default tyre model is synthetic, so treat predicted times
+as illustrative. Monte Carlo is not included, because `run_monte_carlo` simulates a whole race and
+cannot start from a mid-race state.
+
+### Outputs
+
+All are written next to the session log in `outputs/acc_sessions/` and never overwrite earlier files:
+
+* `<log>.jsonl`: normalised telemetry, plus `session_metadata`, `completed_lap`, `stint_summary`, `data_quality` and `strategy_snapshot` records.
+* `<log>_laps.csv` and `<log>_stints.csv`, written when the receiver stops.
+* `<log>_summary.html`: post-session report.
+
+To try the page without ACC (labelled MOCK, and never eligible for a recommendation), use enough
+samples per lap that the mock clock has no gaps:
+
+```bash
+python scripts/send_mock_acc_telemetry.py --host 127.0.0.1 --port 9100 --insecure-no-auth --count 300 --interval 0.05 --lap-samples 30
+```
+

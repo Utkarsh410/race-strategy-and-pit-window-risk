@@ -26,6 +26,9 @@ from racesim.integrations.acc.parser import (
 from racesim.integrations.acc.protocol import BroadcastingEventType, CarLocation, SessionPhase, SessionType, enum_name
 
 
+SESSION_RESTART_REGRESSION_MS = 5000.0
+
+
 def _lap_s(lap: LapInfo) -> Optional[float]:
     """Lap time in seconds; None for the int32-max sentinel or non-positive placeholders."""
     if lap.lap_time_ms is None or lap.lap_time_ms <= 0:
@@ -57,7 +60,10 @@ class AccStateBuilder:
         notes: list[str] = []
         if isinstance(msg, RealtimeUpdate):
             key = (msg.event_index, msg.session_index, msg.session_type, self.track.track_name if self.track else None)
-            if self._session_key is not None and key != self._session_key:
+            # A restart keeps every identifier above; only the session clock shows it (seen in real ACC logs).
+            restarted = (self.realtime is not None and not msg.is_replay_playing and not self.realtime.is_replay_playing
+                         and msg.session_time_ms < self.realtime.session_time_ms - SESSION_RESTART_REGRESSION_MS)
+            if self._session_key is not None and (key != self._session_key or restarted):
                 self.session_id = uuid.uuid4().hex[:12]
                 self.session_changes += 1
                 self.cars.clear()
@@ -138,8 +144,17 @@ class AccStateBuilder:
                     kw[f] = v
                     src[f"vehicle.{f}"] = f"REALTIME_CAR_UPDATE.{n}.laptimeMs"
             if _lap_s(c.last_lap) is not None:
-                kw["last_lap_valid"] = not c.last_lap.is_invalid
-                src["vehicle.last_lap_valid"] = "REALTIME_CAR_UPDATE.lastLap.isInvalid"
+                kw.update(last_lap_valid=not c.last_lap.is_invalid, last_lap_is_out_lap=c.last_lap.is_out_lap,
+                          last_lap_is_in_lap=c.last_lap.is_in_lap)
+                src.update({"vehicle.last_lap_valid": "REALTIME_CAR_UPDATE.lastLap.isInvalid",
+                            "vehicle.last_lap_is_out_lap": "REALTIME_CAR_UPDATE.lastLap.isOutLap",
+                            "vehicle.last_lap_is_in_lap": "REALTIME_CAR_UPDATE.lastLap.isInLap"})
+                last_splits = [None if s is None or s <= 0 else s / 1000.0 for s in c.last_lap.splits_ms]
+                if any(s is not None for s in last_splits):
+                    kw["last_lap_splits_s"] = last_splits
+                    src["vehicle.last_lap_splits_s"] = "REALTIME_CAR_UPDATE.lastLap.splits"
+            kw["current_lap_is_invalid"] = c.current_lap.is_invalid
+            src["vehicle.current_lap_is_invalid"] = "REALTIME_CAR_UPDATE.currentLap.isInvalid"
             splits = [None if s is None or s <= 0 else s / 1000.0 for s in c.current_lap.splits_ms]
             if any(s is not None for s in splits):
                 kw["current_lap_splits_s"] = splits
