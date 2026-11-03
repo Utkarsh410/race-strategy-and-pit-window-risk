@@ -24,6 +24,7 @@ from dashboard import (  # noqa: E402
     uncertainty_view,
 )
 from dashboard.common import cached_synthetic, make_context, ss  # noqa: E402
+from dashboard.theme import apply_brand  # noqa: E402
 from racesim.data_ingestion import DataValidationError, load_race_dataframe  # noqa: E402
 from racesim.data_validation import clean_lap_times  # noqa: E402
 
@@ -31,17 +32,7 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(mes
 
 st.set_page_config(page_title="RaceSim - Strategy & Pit-Window Risk", page_icon=":material/sports_motorsports:", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    .block-container {padding-top: 1.6rem; max-width: 1400px;}
-    div[data-testid="stMetric"] {border: 1px solid #e6e5e1; border-radius: 10px; padding: 8px 12px; background: #fcfcfb;}
-    div[data-testid="stMetricValue"] {font-variant-numeric: tabular-nums; font-size: 1.35rem;}
-    .synthetic-banner {background:#fff4d6;border:1px solid #f0d58a;border-radius:8px;padding:6px 12px;margin-bottom:8px;font-size:0.9rem;color:#3d3a33}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+apply_brand()
 
 
 def load_data(ctx) -> None:

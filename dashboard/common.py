@@ -35,7 +35,9 @@ def ss(key: str, default: Any) -> Any:
 
 
 def show(fig: go.Figure, key: Optional[str] = None) -> None:
-    st.plotly_chart(fig, theme=None, key=key, config={"displaylogo": False})
+    from dashboard.theme import brand_figure
+
+    st.plotly_chart(brand_figure(fig), theme=None, key=key, config={"displaylogo": False})
 
 
 def _scale_laps(laps: list[int], n0: int, n1: int, min_rem: int) -> list[int]:

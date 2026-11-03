@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from dashboard.common import DashboardContext, base_setup, cached_optimisation, show, ss, to_csv_bytes
+from dashboard.theme import HIGHLIGHT
 from racesim.plotting import plot_strategy_comparison, plot_tyre_degradation
 from racesim.schemas import Strategy
 from racesim.strategy_optimizer import simulate_strategy
@@ -94,7 +95,7 @@ def render(ctx: DashboardContext) -> None:
     cols = ["rank", "strategy_name", "pit_laps", "compounds", "stint_lengths", "race_time_s", "total_pit_cost_s",
             "tyre_time_s", "feasible"] + (["delta_to_baseline_s"] if "delta_to_baseline_s" in df.columns else [])
     view = df[cols + ["strategy_id"]].head(top_n)
-    styled = view.style.apply(lambda row: ["background-color:#dff3ea; font-weight:600" if row["strategy_id"] == best_id else ""
+    styled = view.style.apply(lambda row: [f"background-color:{HIGHLIGHT}; font-weight:600" if row["strategy_id"] == best_id else ""
                                            for _ in row], axis=1).format(precision=2)
     st.dataframe(styled, hide_index=True, column_config={"strategy_id": None})
     st.caption(f"{opt.candidates_evaluated} candidates evaluated; pit-lap grid steps by stop count {opt.lap_steps} "

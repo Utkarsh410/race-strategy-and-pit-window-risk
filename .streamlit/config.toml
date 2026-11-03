@@ -1,0 +1,27 @@
+# Veltrix Motorsport brand theme for the RaceSim dashboard.
+# Colours and fonts are taken from the CSS variables published on
+# https://www.veltrixmotorsport.com (checked 2026-11-03); see dashboard/theme.py.
+
+[theme]
+base = "dark"
+primaryColor = "#B9A7E8"              # --color-lavender (accent)
+backgroundColor = "#0B0B0D"           # --color-carbon
+secondaryBackgroundColor = "#17171B"  # --color-carbon-800
+textColor = "#FFFFFF"                 # --color-white
+linkColor = "#B9A7E8"
+borderColor = "#FFFFFF33"             # --color-line-strong
+dataframeBorderColor = "#FFFFFF1A"    # --color-line
+dataframeHeaderBackgroundColor = "#111114"  # --color-carbon-900
+codeBackgroundColor = "#111114"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap, sans-serif"
+headingFont = "Space Grotesk:https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&display=swap, sans-serif"
+headingFontWeights = [600, 600, 500, 500, 500, 500]
+baseRadius = "small"                  # the site uses square corners (0) and 0.25rem
+buttonRadius = "small"
+showWidgetBorder = true
+# Lavender and beige first, then the dashboard's validated categorical slots.
+chartCategoricalColors = ["#B9A7E8", "#E7DDCF", "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#e34948"]
+
+[theme.sidebar]
+backgroundColor = "#111114"           # --color-carbon-900
+secondaryBackgroundColor = "#17171B"
