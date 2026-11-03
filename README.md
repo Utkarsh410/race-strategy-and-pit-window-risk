@@ -297,6 +297,12 @@ synthetic mode is unchanged.
   and pit recommendations stay disabled. Real-session evidence so far is practice
   at one track; the tests use deterministic synthetic fixtures.
 
+* **Calibration from recorded sessions** (`scripts/calibrate_from_acc.py`): replays logs
+  through the live lap tracker, converts real (non-mock) laps to RaceSim's lap schema and
+  reports, per track and parameter, an estimate or the data still needed (pace,
+  variability, pit loss, degradation, held-out validation). It never applies values
+  automatically, and never uses the synthetic fuel rate for real data.
+
 Setup, the network checklist and the first-session test are in
 [docs/ACC_LIVE_TELEMETRY_SETUP.md](docs/ACC_LIVE_TELEMETRY_SETUP.md).
 
@@ -648,8 +654,8 @@ With coverage:
 pytest --cov=racesim --cov-report=term
 ```
 
-The suite has 312 tests: the 110 from v1, unchanged, 46 for v2 and 156 for the
-ACC integration (`tests/integrations/acc/`). The v1 tests It covers configuration validation, data loading and
+The suite has 317 tests: the 110 from v1, unchanged, 46 for v2 and 161 for the
+ACC integration (`tests/integrations/acc/`). The v1 tests cover configuration validation, data loading and
 validation, tyre/fuel/pit models, the pit window (with a hand-calculated optimum
 that is not the midpoint), strategy generation limits, the optimiser
 (known-optimum case, agreement with the simulator), race-simulation time

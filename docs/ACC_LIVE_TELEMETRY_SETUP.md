@@ -378,3 +378,50 @@ samples per lap that the mock clock has no gaps:
 python scripts/send_mock_acc_telemetry.py --host 127.0.0.1 --port 9100 --insecure-no-auth --count 300 --interval 0.05 --lap-samples 30
 ```
 
+
+## Calibrating RaceSim from your recorded sessions
+
+`scripts/calibrate_from_acc.py` fits RaceSim's model to your own ACC laps. It
+replays every recorded log through the same lap tracker the dashboard uses,
+keeps only real (`acc_udp`) sessions, and converts the completed laps to
+RaceSim's lap CSV schema. For each track and parameter it then reports either
+an estimate or how much more data is needed. Nothing is applied to the
+configuration automatically.
+
+```bash
+python scripts/calibrate_from_acc.py
+```
+
+```bash
+python scripts/calibrate_from_acc.py --track "Circuit Paul Ricard" --compound DRY --fuel-start 60 --fuel-per-lap 2.9
+```
+
+Outputs (in `outputs/`):
+
+* `acc_calibration_laps.csv`: the lap data. You can also use it with
+  `scripts/validate_model.py --data ...` or upload it in dashboard Section F.
+* `acc_calibration_sufficiency.csv`: data needed versus available, per parameter.
+* `acc_calibration_report.md`: the full report.
+
+| Parameter (per track) | Minimum data | How to get it |
+|---|---|---|
+| Observed clean pace | 5 clean laps | any practice run |
+| Lap-to-lap variability | 8 clean laps in stints of 4 or more | runs of 4+ consecutive clean laps |
+| Pit loss (cross-check) | 1 observed stop + 5 clean laps | drive through the pits once, with an in-lap and an out-lap |
+| Tyre degradation | 12 clean laps with known tyre age **and a declared compound** | long runs that start from the pits; pass `--compound` |
+| Held-out validation | 30 training + 30 held-out clean laps, in several separate stints | several sessions or stints at the same track |
+
+Assumptions the calibration makes:
+
+* The UDP feed has **no tyre compound and no fuel**. `--compound` and
+  `--fuel-start`/`--fuel-per-lap` are your declarations and are recorded as
+  assumptions.
+* Without fuel data the degradation slope is reported as *confounded with fuel
+  burn* and marked unreliable. It is never corrected with RaceSim's synthetic
+  default consumption rate.
+* Tyre age counts laps since the stint began, only for stints that start in the
+  pits (a fresh set is assumed). For stints first seen on track it is unknown.
+* Only laps the tracker classifies as clean are used for fitting. Invalid laps,
+  out-laps, in-laps and uncertain laps are kept in the CSV but excluded.
+* These are recorded **simulator** sessions. The results calibrate RaceSim to
+  ACC, not to real-world racing.
