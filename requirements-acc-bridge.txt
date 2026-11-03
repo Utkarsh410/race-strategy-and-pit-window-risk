@@ -2,3 +2,6 @@
 # The bridge does not need RaceSim's numerical stack (numpy/pandas/scipy/streamlit).
 pydantic>=2.5
 PyYAML>=6.0
+# Optional: shared-memory physics (--physics). Windows only; MIT licence; 1.0.0 is the
+# version whose source this integration was checked against.
+pyaccsharedmemory==1.0.0; sys_platform == "win32"

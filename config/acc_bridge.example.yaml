@@ -51,3 +51,15 @@ logging:
   session_logging: true
   flush_every_records: 20
   flush_interval_seconds: 2.0
+
+# Shared-memory physics (Windows bridge, pyaccsharedmemory). Off by default so a
+# broadcast-only setup behaves exactly as before. Enable here or with --physics.
+# Update the Mac receiver BEFORE enabling: older receivers reject "physics" messages
+# (telemetry, heartbeats and events keep working).
+physics:
+  enabled: false
+  sample_hz: 20.0             # shared-memory reads per second (reader thread, no network/disk)
+  forward_hz: 5.0             # physics messages per second to the Mac (must be <= sample_hz)
+  status_interval_s: 1.0      # reader-status message when there is no new sample
+  reader_stale_after_s: 2.0   # no new packet for this long -> WAITING_FOR_ACC
+  channels: null              # null = all channels; or a list, e.g. [speed_kmh, rpm, fuel_remaining, tyre_pressure]

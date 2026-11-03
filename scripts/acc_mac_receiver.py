@@ -32,6 +32,15 @@ from racesim.integrations.acc.live_analysis import LiveAnalysis, write_session_e
 from racesim.integrations.acc.session_logger import SessionLogger, export_session_csv  # noqa: E402
 
 
+def _physics_brief(rx) -> str:
+    lp = rx.latest_physics()
+    if lp is None:
+        return "no samples"
+    c = lp[0].get("channels", {})
+    return (f"{'MOCK ' if lp[2] else ''}speed={c.get('speed_kmh')} rpm={c.get('rpm')} fuel_raw={c.get('fuel_remaining')} "
+            f"tyre_p={c.get('tyre_pressure')} ({len(lp[0].get('available', []))} ch, {lp[1]:.1f}s old)")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=None, help="YAML file (default: config/acc_bridge.yaml if present)")
@@ -86,7 +95,9 @@ def main(argv: list[str] | None = None) -> int:
                   f"telemetry={h.telemetry.value} | valid={h.valid_messages} invalid={h.invalid_packets} dup={h.duplicate_packets} "
                   f"ooo={h.out_of_order_packets} gaps={h.sequence_gaps} last_seq={h.last_sequence} | "
                   f"{'MOCK ' if h.mock else ''}track={s.get('track_name')} lap={v.get('current_lap')} pos={v.get('position')} "
-                  f"last={v.get('last_lap_time_s')}", flush=True)
+                  f"last={v.get('last_lap_time_s')}"
+                  + ("" if h.physics.value == "NOT_STARTED" else
+                     f" | physics={h.physics.value} reader={h.physics_reader_status} " + _physics_brief(rx)), flush=True)
             if args.duration is not None and time.monotonic() - t0 >= args.duration:
                 break
     finally:

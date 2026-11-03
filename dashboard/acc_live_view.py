@@ -28,6 +28,7 @@ from racesim.integrations.acc.health import HealthState
 from racesim.integrations.acc.live_analysis import LiveAnalysis, write_session_exports
 from racesim.integrations.acc.receiver import ReceiverBindError, TelemetryReceiver
 from racesim.integrations.acc.session_logger import SessionLogger, flatten_record, read_session_log
+from racesim.integrations.acc.physics_channels import physics_table
 from racesim.integrations.acc.state_builder import MOCK, STALE, channel_table
 
 CONFIG_PATH = PROJECT_ROOT / "config" / "acc_bridge.yaml"
@@ -140,6 +141,39 @@ def _receiver_controls(cfg, mgr: ReceiverManager) -> None:
             st.sidebar.caption(f"Session log: {rx.session_logger.path.relative_to(PROJECT_ROOT) if rx.session_logger.path.is_relative_to(PROJECT_ROOT) else rx.session_logger.path}")
 
 
+def _physics_panel(rx, h) -> None:
+    """Shared-memory physics (only shown once a physics message has arrived)."""
+    if h.physics == HealthState.NOT_STARTED:
+        st.caption("Physics (shared memory): not received. Start the Windows bridge with --physics to enable it.")
+        return
+    status = rx.latest_physics_status()
+    reader = status[0].get("reader_status") if status else None
+    st.markdown(f"**Physics - shared memory** | health {h.physics.value} | Windows reader {reader}"
+                + ("" if h.last_physics_sample_age_s is None else f" | last sample {h.last_physics_sample_age_s:.1f} s ago"))
+    if status and status[0].get("last_error"):
+        st.warning(f"Windows reader: {status[0]['last_error']}")
+    lp = rx.latest_physics()
+    if lp is None:
+        st.info("No physics samples yet: the Windows reader reports " + str(reader) + " (ACC not running, in the menu or paused).")
+        return
+    payload, age, mock = lp
+    stale = h.physics != HealthState.CONNECTED
+    rows = physics_table(payload, mock=mock, stale=stale)
+    k = st.columns(6)
+    c = payload.get("channels", {})
+    for col, (label, key, unit) in zip(k, [("Speed", "speed_kmh", "km/h"), ("RPM", "rpm", ""), ("Throttle", "throttle", ""),
+                                           ("Brake", "brake", ""), ("Fuel (raw, unit disputed)", "fuel_remaining", ""),
+                                           ("Gear (raw)", "gear_raw", "")]):
+        col.metric(label, _fmt(c.get(key), unit))
+    table = pd.DataFrame(rows)
+    table["value"] = table["value"].map(lambda x: "" if x is None else (", ".join("-" if v is None else f"{v:.3f}" for v in x)
+                                                                       if isinstance(x, list) else str(x)))
+    st.caption(f"{len(payload.get('available', []))} measured channels, {len(payload.get('missing', []))} missing in this sample; "
+               "values are in native ACC units. unit_status: kunos = stated in Kunos's v1.8.12 document; conflict = sources "
+               "disagree; unstated = expected unit, not verified; derived = calculated on the Mac.")
+    st.dataframe(table, hide_index=True)
+
+
 def render_live(mgr: ReceiverManager, refresh_s: float) -> None:
     @st.fragment(run_every=refresh_s)
     def live_panel() -> None:
@@ -177,6 +211,7 @@ def render_live(mgr: ReceiverManager, refresh_s: float) -> None:
             st.caption(f"Rejected packets by reason: {h.invalid_reasons}")
         if h.last_error:
             st.error(h.last_error)
+        _physics_panel(rx, h)
         if latest is None:
             st.info("Waiting for telemetry. Nothing is displayed until a valid message arrives.")
             return

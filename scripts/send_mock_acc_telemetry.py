@@ -33,9 +33,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lap-samples", type=int, default=5, help="messages per simulated lap; use 30 or more for clean laps in ACC Performance")
     ap.add_argument("--secret-env", default="RACESIM_BRIDGE_SECRET")
     ap.add_argument("--insecure-no-auth", action="store_true")
+    ap.add_argument("--physics", action="store_true", help="also send MOCK shared-memory physics samples")
     args = ap.parse_args(argv)
     secret = None if args.insecure_no_auth else load_secret(args.secret_env, required=True)
     gen = MockTelemetryGenerator(seed=args.seed, lap_samples=args.lap_samples)
+    physics = None
+    if args.physics:
+        from racesim.integrations.acc.mock import MockSharedMemorySource
+        from racesim.integrations.acc.shared_memory import PhysicsReader
+
+        physics = PhysicsReader(lambda: MockSharedMemorySource(seed=args.seed))
     tx = BridgeSender(args.host, args.port, secret=secret, sender_id="mock-sender", mock=True)
     t0 = time.monotonic()
     try:
@@ -43,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
             tx.send("heartbeat", gen.heartbeat(forwarded=tx.sent, uptime_s=time.monotonic() - t0).model_dump(mode="json"))
             payload = gen.telemetry(tx.sequence + 1)
             tx.send("telemetry", payload.model_dump(mode="json"))
+            if physics is not None and physics.poll_once():
+                tx.send("physics", physics.build_payload(session_id=gen.session_id).model_dump(mode="json"))
             if "lap_completed" in payload.data_quality:
                 tx.send("event", gen.lap_event().model_dump(mode="json"))
             print(f"MOCK sent seq={tx.sequence} lap={payload.vehicle.current_lap} errors={tx.errors}", flush=True)

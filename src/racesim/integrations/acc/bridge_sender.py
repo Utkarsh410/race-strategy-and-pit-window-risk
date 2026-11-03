@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import threading
 import uuid
 from typing import Any, Optional
 
@@ -39,6 +40,7 @@ class BridgeSender:
         self.errors = 0
         self.last_error: Optional[str] = None
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._lock = threading.Lock()  # telemetry and physics threads share one sequence counter
 
     def build(self, message_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.sequence += 1
@@ -50,7 +52,11 @@ class BridgeSender:
         return env
 
     def send(self, message_type: str, payload: dict[str, Any]) -> bool:
-        """Serialise, sign and send one message. Returns False (and records the error) on failure."""
+        """Serialise, sign and send one message (thread-safe). Returns False (and records the error) on failure."""
+        with self._lock:
+            return self._send(message_type, payload)
+
+    def _send(self, message_type: str, payload: dict[str, Any]) -> bool:
         env = self.build(message_type, payload)
         data = json.dumps(env, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")
         if len(data) > self.max_bytes:

@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--log-level", default=None)
     ap.add_argument("--log-file", default=None, help="optional bridge log file")
     ap.add_argument("--insecure-no-auth", action="store_true", help="send unsigned messages (loopback testing only)")
+    ap.add_argument("--physics", action="store_true", help="also forward shared-memory physics (pyaccsharedmemory, Windows only)")
+    ap.add_argument("--physics-hz", type=float, default=None, help="physics forwarding rate (default 5 Hz)")
     args = ap.parse_args(argv)
 
     default_cfg = ROOT / "config" / "acc_bridge.yaml"
@@ -72,7 +74,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if secret is None:
         log.warning("Sending UNSIGNED messages (--insecure-no-auth). Use only for local testing.")
-    bridge = AccBridge(bcfg, connection_password=password, secret=secret)
+    pcfg = cfg.physics
+    if args.physics or args.physics_hz is not None:
+        pcfg = pcfg.model_validate({**pcfg.model_dump(), "enabled": True,
+                                    **({"forward_hz": args.physics_hz} if args.physics_hz is not None else {})})
+    if pcfg.enabled:
+        log.info("Physics forwarding ON (%.1f Hz read, %.1f Hz forward). Update the Mac receiver first: older receivers "
+                 "reject 'physics' messages (telemetry is unaffected).", pcfg.sample_hz, pcfg.forward_hz)
+    bridge = AccBridge(bcfg, connection_password=password, secret=secret, physics=pcfg)
     signal.signal(signal.SIGINT, lambda *_: bridge.stop())
     log.info("ACC broadcasting at %s:%d -> RaceSim receiver at %s:%d", bcfg.acc_host, bcfg.native_broadcast_port,
              bcfg.target_host, bcfg.target_port)

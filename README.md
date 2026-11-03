@@ -297,6 +297,14 @@ synthetic mode is unchanged.
   and pit recommendations stay disabled. Real-session evidence so far is practice
   at one track; the tests use deterministic synthetic fixtures.
 
+* **Shared-memory physics (optional, Windows):** `--physics` on the bridge reads ACC's shared
+  memory with `pyaccsharedmemory` 1.0.0 in a separate reader thread and forwards 61 channels
+  (inputs, speed, rpm, fuel, velocity, acceleration, slip, tyre pressure and temperature, brake
+  temperature, suspension, ...). Values stay in native units, and each unit is marked as stated
+  by Kunos, conflicting, or unverified. `scripts/acc_shared_memory_diagnostic.py` prints the
+  live channels on Windows before forwarding is enabled. The Mac shows physics as a separate
+  health component and a labelled panel. Physics is off by default, so broadcast-only setups
+  are unchanged. Not yet verified with a running game.
 * **Calibration from recorded sessions** (`scripts/calibrate_from_acc.py`): replays logs
   through the live lap tracker, converts real (non-mock) laps to RaceSim's lap schema and
   reports, per track and parameter, an estimate or the data still needed (pace,
@@ -654,7 +662,7 @@ With coverage:
 pytest --cov=racesim --cov-report=term
 ```
 
-The suite has 317 tests: the 110 from v1, unchanged, 46 for v2 and 161 for the
+The suite has 335 tests: the 110 from v1, unchanged, 46 for v2 and 179 for the
 ACC integration (`tests/integrations/acc/`). The v1 tests cover configuration validation, data loading and
 validation, tyre/fuel/pit models, the pit window (with a hand-calculated optimum
 that is not the midpoint), strategy generation limits, the optimiser

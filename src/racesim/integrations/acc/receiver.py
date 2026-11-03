@@ -96,6 +96,8 @@ class TelemetryReceiver:
         self._lock = threading.Lock()
         self._latest: Optional[tuple[dict, float, datetime, bool]] = None   # payload, monotonic t, utc, mock
         self._latest_heartbeat: Optional[tuple[dict, float]] = None
+        self._latest_physics: Optional[tuple[dict, float, bool]] = None
+        self._latest_physics_status: Optional[tuple[dict, float]] = None
         self.history: deque = deque(maxlen=history_size)
         self.events: deque = deque(maxlen=200)
         self.bound_address: Optional[tuple[str, int]] = None
@@ -188,7 +190,9 @@ class TelemetryReceiver:
         received_utc = utc_now()
         p = payload.model_dump(mode="json")
         self.health.record_valid(env.message_type, now, session_id=p.get("session_id"), mock=env.mock,
-                                 acc_status=p.get("acc_status"), acc_packet_age_s=p.get("acc_last_packet_age_s"))
+                                 acc_status=p.get("acc_status"), acc_packet_age_s=p.get("acc_last_packet_age_s"),
+                                 physics_reader_status=p.get("reader_status") if env.message_type == "physics" else None,
+                                 physics_has_sample=env.message_type == "physics" and bool(p.get("channels")))
         quality = [] if status == "new" else [status]
         with self._lock:
             if env.message_type == "telemetry" and status == "new":
@@ -197,6 +201,10 @@ class TelemetryReceiver:
                 self._latest_heartbeat = (p, now)
             elif env.message_type == "event":
                 self.events.append((p, received_utc))
+            elif env.message_type == "physics" and status == "new":
+                self._latest_physics_status = (p, now)
+                if p.get("channels"):
+                    self._latest_physics = (p, now, env.mock)
             self.history.append({"received_at_utc": received_utc, "sequence": env.sequence, "message_type": env.message_type,
                                  "mock": env.mock, "status": status, "payload": p})
         if self.session_logger is not None:
@@ -216,6 +224,22 @@ class TelemetryReceiver:
             if self._latest is None:
                 return None
             p, t, _, _ = self._latest
+            return p, time.monotonic() - t
+
+    def latest_physics(self) -> Optional[tuple[dict, float, bool]]:
+        """``(payload, age_s, mock)`` of the newest physics sample with channels, or None."""
+        with self._lock:
+            if self._latest_physics is None:
+                return None
+            p, t, mock = self._latest_physics
+            return p, time.monotonic() - t, mock
+
+    def latest_physics_status(self) -> Optional[tuple[dict, float]]:
+        """Newest physics message of any kind (sample or reader status) and its age."""
+        with self._lock:
+            if self._latest_physics_status is None:
+                return None
+            p, t = self._latest_physics_status
             return p, time.monotonic() - t
 
     def latest_is_mock(self) -> Optional[bool]:

@@ -116,11 +116,41 @@ class LoggingConfig(_Cfg):
         return v
 
 
+class PhysicsConfig(_Cfg):
+    """Windows shared-memory physics forwarding (off by default: broadcast-only setups are unchanged)."""
+
+    enabled: bool = False
+    sample_hz: float = Field(default=20.0, gt=0, le=200)
+    forward_hz: float = Field(default=5.0, gt=0, le=60)
+    status_interval_s: float = Field(default=1.0, gt=0, le=60)
+    reader_stale_after_s: float = Field(default=2.0, gt=0, le=60)
+    channels: Optional[list[str]] = None   # None = every defined channel
+
+    @field_validator("channels")
+    @classmethod
+    def _known(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return v
+        from racesim.integrations.acc.physics_channels import BY_NAME
+
+        bad = [c for c in v if c not in BY_NAME]
+        if bad:
+            raise ValueError(f"unknown physics channel(s): {bad}")
+        return v
+
+    @model_validator(mode="after")
+    def _rates(self) -> "PhysicsConfig":
+        if self.forward_hz > self.sample_hz:
+            raise ValueError("physics.forward_hz must not exceed physics.sample_hz")
+        return self
+
+
 class AccIntegrationConfig(_Cfg):
     acc_bridge: AccBridgeConfig = Field(default_factory=AccBridgeConfig)
     mac_receiver: MacReceiverConfig = Field(default_factory=MacReceiverConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    physics: PhysicsConfig = Field(default_factory=PhysicsConfig)
 
     def bridge_port_conflicts(self) -> list[str]:
         """Port conflicts the bridge would hit (forwarding into ACC's own port on the same machine)."""

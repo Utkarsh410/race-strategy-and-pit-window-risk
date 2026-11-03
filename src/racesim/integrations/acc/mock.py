@@ -7,6 +7,7 @@ these as mock data. They are never presented as live ACC telemetry.
 
 from __future__ import annotations
 
+import math
 import random
 import uuid
 from dataclasses import dataclass, field
@@ -65,3 +66,85 @@ class MockTelemetryGenerator:
     def lap_event(self) -> EventPayload:
         return EventPayload(source="mock", timestamp_utc=utc_now(), session_id=self.session_id, event_type="LAP_COMPLETED",
                             message=f"MOCK lap {self._laps} completed", car_id=1)
+
+
+# ---------------------------------------------------------------------------
+# Mock shared-memory source (same attribute structure as pyaccsharedmemory 1.0.0)
+# ---------------------------------------------------------------------------
+
+from enum import Enum as _Enum
+from types import SimpleNamespace as _NS
+
+
+class MockAccStatus(_Enum):
+    """Mirrors pyaccsharedmemory's ACC_STATUS member names."""
+
+    ACC_OFF = 0
+    ACC_REPLAY = 1
+    ACC_LIVE = 2
+    ACC_PAUSE = 3
+
+
+def _wheels(fl, fr, rl, rr):
+    return _NS(front_left=fl, front_right=fr, rear_left=rl, rear_right=rr)
+
+
+def _vec(x, y, z):
+    return _NS(x=x, y=y, z=z)
+
+
+@dataclass
+class MockSharedMemorySource:
+    """Deterministic MOCK snapshots shaped like ``pyaccsharedmemory``'s ``ACC_map``.
+
+    Values are synthetic and plausible-looking; they are NOT ACC data.
+    ``drop`` removes attributes (to test missing-channel detection) and
+    ``status`` simulates ACC being off, paused or in a replay.
+    """
+
+    seed: int = 0
+    drop: tuple[str, ...] = ()
+    status: str = "ACC_LIVE"
+    freeze_packet: bool = False
+    raise_every: int = 0          # simulate the library's ValueError on unknown enums every N reads
+    source_name: str = "mock"
+    _i: int = field(default=0, init=False)
+    closed: bool = field(default=False, init=False)
+
+    def read(self):
+        self._i += 1
+        if self.raise_every and self._i % self.raise_every == 0:
+            raise ValueError("99 is not a valid ACC_FLAG_TYPE")
+        rng = random.Random(self.seed * 100_003 + self._i)
+        t = self._i * 0.05
+        speed = 180 + 40 * math.sin(t / 3)
+        phys = _NS(packed_id=1 if self.freeze_packet else self._i, gas=round(0.5 + 0.5 * math.sin(t), 3),
+                   brake=round(max(0.0, -math.sin(t)), 3), clutch=0.0, steer_angle=round(0.3 * math.sin(t / 2), 3), gear=4,
+                   rpm=int(6500 + 800 * math.sin(t)), speed_kmh=round(speed, 2), fuel=round(60 - 0.001 * self._i, 3),
+                   velocity=_vec(speed / 3.6, 0.0, 0.1), local_velocity=_vec(0.1, 0.0, speed / 3.6), g_force=_vec(0.1, 1.0, -0.4),
+                   local_angular_vel=_vec(0.0, 0.05, 0.0), heading=0.5, pitch=0.01, roll=0.0,
+                   wheel_slip=_wheels(0.1, 0.1, 0.2, 0.2), slip_ratio=_wheels(0.01, 0.01, 0.02, 0.02),
+                   slip_angle=_wheels(0.02, 0.02, 0.01, 0.01), wheel_angular_s=_wheels(150.0, 150.0, 148.0, 148.0),
+                   wheel_pressure=_wheels(*(round(27.5 + rng.gauss(0, 0.05), 2) for _ in range(4))),
+                   tyre_core_temp=_wheels(*(round(85 + rng.gauss(0, 0.5), 1) for _ in range(4))),
+                   brake_temp=_wheels(450.0, 452.0, 380.0, 381.0), brake_pressure=_wheels(0.0, 0.0, 0.0, 0.0),
+                   pad_life=_wheels(28.5, 28.5, 28.7, 28.7), disc_life=_wheels(31.8, 31.8, 31.9, 31.9),
+                   suspension_travel=_wheels(0.031, 0.030, 0.042, 0.041), suspension_damage=_wheels(0, 0, 0, 0),
+                   tc=0.0, abs=0.0, brake_bias=0.56, pit_limiter_on=False, is_ai_controlled=False, air_temp=22.0, road_temp=30.0,
+                   water_temp=88.0, turbo_boost=0.0)
+        gfx = _NS(packed_id=self._i, status=MockAccStatus[self.status], session_type=_NS(name="ACC_PRACTICE"), completed_lap=self._i // 1000,
+                  position=1, current_time=int(self._i * 50 % 100_000), last_time=101_234, best_time=100_987,
+                  current_sector_index=0, is_in_pit=False, is_in_pit_lane=False, tyre_compound="dry_compound\x00\x00",
+                  current_tyre_set=1, track_grip_status=_NS(name="ACC_OPTIMUM"), rain_intensity=_NS(name="ACC_NO_RAIN"),
+                  flag=_NS(name="ACC_NO_FLAG"), session_time_left=1_800_000.0, fuel_per_lap=2.9, fuel_estimated_laps=20.5,
+                  used_fuel=0.5)
+        static = _NS(car_model="mock_car (synthetic)", track="MOCK TRACK (synthetic)", max_rpm=8000, max_fuel=120.0,
+                     sm_version="1.8\x00", ac_version="mock\x00")
+        for name in self.drop:
+            for obj in (phys, gfx, static):
+                if hasattr(obj, name):
+                    delattr(obj, name)
+        return _NS(Physics=phys, Graphics=gfx, Static=static)
+
+    def close(self) -> None:
+        self.closed = True

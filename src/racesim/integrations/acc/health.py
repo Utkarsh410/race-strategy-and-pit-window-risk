@@ -60,6 +60,11 @@ class HealthSnapshot:
     mock: Optional[bool]
     last_error: Optional[str]
     invalid_reasons: dict[str, int] = field(default_factory=dict)
+    # Shared-memory physics (separate component; does not change ``overall``)
+    physics: HealthState = HealthState.NOT_STARTED
+    physics_reader_status: Optional[str] = None
+    last_physics_sample_age_s: Optional[float] = None
+    last_physics_message_age_s: Optional[float] = None
 
     def as_dict(self) -> dict:
         d = asdict(self)
@@ -102,6 +107,9 @@ class ConnectionHealth:
         self.acc_status: Optional[str] = None
         self.acc_packet_age_at_heartbeat: Optional[float] = None
         self.mock: Optional[bool] = None
+        self.last_physics_message_t: Optional[float] = None
+        self.last_physics_sample_t: Optional[float] = None
+        self.physics_reader_status: Optional[str] = None
 
     # -- receiver lifecycle -------------------------------------------------
     def mark_listening(self) -> None:
@@ -152,7 +160,8 @@ class ConnectionHealth:
             return "new"
 
     def record_valid(self, message_type: str, now: float, *, session_id: Optional[str] = None, mock: bool = False,
-                     acc_status: Optional[str] = None, acc_packet_age_s: Optional[float] = None) -> None:
+                     acc_status: Optional[str] = None, acc_packet_age_s: Optional[float] = None,
+                     physics_reader_status: Optional[str] = None, physics_has_sample: bool = False) -> None:
         with self._lock:
             self.valid_messages += 1
             self.last_valid_t = now
@@ -165,6 +174,11 @@ class ConnectionHealth:
                 self.last_heartbeat_t = now
                 self.acc_status = acc_status
                 self.acc_packet_age_at_heartbeat = acc_packet_age_s
+            elif message_type == "physics":
+                self.last_physics_message_t = now
+                self.physics_reader_status = physics_reader_status
+                if physics_has_sample:
+                    self.last_physics_sample_t = now
 
     # -- state ----------------------------------------------------------------
     def _freshness(self, age: Optional[float]) -> HealthState:
@@ -214,9 +228,30 @@ class ConnectionHealth:
                 overall = max(parts, key=_SEVERITY.index)
                 if overall in (HealthState.NOT_STARTED, HealthState.CONNECTED):
                     overall = HealthState.WAITING_FOR_DATA
+            physics = self._physics_state(now)
             return HealthSnapshot(
                 overall, receiver, bridge, acc, telemetry, self._listening, self.packets_received, self.valid_messages,
                 self.invalid_packets, self.duplicates, self.out_of_order, self.gaps, self.last_sequence,
                 _age(now, self.last_valid_t), tel_age, hb_age, self.session_id, self.acc_status,
                 None if self.acc_packet_age_at_heartbeat is None or hb_age is None else self.acc_packet_age_at_heartbeat + hb_age,
-                self.mock, self._error, dict(self.invalid_reasons))
+                self.mock, self._error, dict(self.invalid_reasons), physics, self.physics_reader_status,
+                _age(now, self.last_physics_sample_t), _age(now, self.last_physics_message_t))
+
+    def _physics_state(self, now: float) -> HealthState:
+        """NOT_STARTED until a physics message arrives (broadcast-only setups stay NOT_STARTED).
+
+        Freshness follows the newest physics *message*; while the reader reports
+        LIVE/MOCK the newest *sample* must also be fresh. ERROR if the Windows
+        reader cannot open shared memory or reports an error.
+        """
+        msg_age = _age(now, self.last_physics_message_t)
+        if msg_age is None:
+            return HealthState.NOT_STARTED
+        fresh = self._freshness(msg_age)
+        if fresh != HealthState.CONNECTED:
+            return fresh
+        if self.physics_reader_status in ("ERROR", "NOT_AVAILABLE"):
+            return HealthState.ERROR
+        if self.physics_reader_status in ("LIVE", "MOCK"):
+            return self._freshness(_age(now, self.last_physics_sample_t))
+        return HealthState.WAITING_FOR_DATA  # WAITING_FOR_ACC / PAUSED / REPLAY

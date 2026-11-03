@@ -42,7 +42,7 @@ update the Mac first, or both together.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -194,7 +194,82 @@ class EventPayload(_Model):
         return _check_utc(v)
 
 
-PAYLOAD_MODELS: dict[str, type[_Model]] = {"telemetry": TelemetryPayload, "heartbeat": HeartbeatPayload, "event": EventPayload}
+PHYSICS_SCHEMA_VERSION = "1.0"
+ReaderStatus = Literal["NOT_AVAILABLE", "WAITING_FOR_ACC", "LIVE", "PAUSED", "REPLAY", "ERROR", "MOCK"]
+ChannelValue = Union[None, bool, int, float, str, list[Optional[float]]]
+
+
+class PhysicsPayload(_Model):
+    """Shared-memory sample from the Windows reader (message type ``physics``).
+
+    Added compatibly: broadcast-only bridges never send it, and receivers that
+    predate it reject it as an unknown message type without affecting
+    telemetry, heartbeats or events. Channel names, units and their
+    verification status are defined in :mod:`racesim.integrations.acc.physics_channels`;
+    values are in native ACC units. ``available`` / ``missing`` list which
+    channels the reader actually obtained in this sample.
+    """
+
+    physics_schema_version: str = PHYSICS_SCHEMA_VERSION
+    source: Literal["acc_shared_memory", "mock"]
+    timestamp_utc: datetime
+    sample_sequence: int = Field(ge=0)
+    physics_packet_id: Optional[int] = None
+    graphics_packet_id: Optional[int] = None
+    reader_status: ReaderStatus
+    session_id: Optional[str] = Field(default=None, max_length=64)
+    channels: dict[str, ChannelValue] = Field(default_factory=dict)
+    available: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    samples_read: int = Field(default=0, ge=0)
+    read_errors: int = Field(default=0, ge=0)
+    sample_age_s: Optional[float] = Field(default=None, ge=0, le=3600)
+    last_error: Optional[str] = Field(default=None, max_length=300)
+
+    @field_validator("timestamp_utc")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        return _check_utc(v)
+
+    @field_validator("physics_schema_version")
+    @classmethod
+    def _pversion(cls, v: str) -> str:
+        if v != PHYSICS_SCHEMA_VERSION:
+            raise ValueError(f"unsupported physics schema version {v!r}")
+        return v
+
+    @field_validator("channels")
+    @classmethod
+    def _channels(cls, v: dict) -> dict:
+        import math
+
+        from racesim.integrations.acc.physics_channels import BY_NAME
+
+        for name, value in v.items():
+            ch = BY_NAME.get(name)
+            if ch is None:
+                raise ValueError(f"unknown physics channel {name!r}")
+            if value is None:
+                continue
+            if ch.kind in ("wheels", "vector"):
+                n = 4 if ch.kind == "wheels" else 3
+                if not isinstance(value, list) or len(value) != n:
+                    raise ValueError(f"{name} must be a list of {n} values")
+                if any(x is not None and (isinstance(x, bool) or not math.isfinite(x)) for x in value):
+                    raise ValueError(f"{name} contains a non-finite value")
+            elif ch.kind in ("text", "enum"):
+                if not isinstance(value, str) or len(value) > 64:
+                    raise ValueError(f"{name} must be a short string")
+            elif ch.kind == "bool":
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name} must be a boolean")
+            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+        return v
+
+
+PAYLOAD_MODELS: dict[str, type[_Model]] = {"telemetry": TelemetryPayload, "heartbeat": HeartbeatPayload, "event": EventPayload,
+                                           "physics": PhysicsPayload}
 
 
 class Envelope(_Model):
@@ -205,7 +280,7 @@ class Envelope(_Model):
     a restart is not mistaken for out-of-order delivery.
     """
 
-    message_type: Literal["telemetry", "heartbeat", "event"]
+    message_type: Literal["telemetry", "heartbeat", "event", "physics"]
     schema_version: str
     sequence: int = Field(ge=0)
     sent_at_utc: datetime

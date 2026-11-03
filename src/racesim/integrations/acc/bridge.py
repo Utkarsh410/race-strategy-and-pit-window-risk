@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 from racesim.integrations.acc.bridge_sender import BridgeSender
 from racesim.integrations.acc.client import AccBroadcastClient
-from racesim.integrations.acc.config import AccBridgeConfig
+from racesim.integrations.acc.config import AccBridgeConfig, PhysicsConfig
 from racesim.integrations.acc.models import HeartbeatPayload, utc_now
 from racesim.integrations.acc.parser import BroadcastingEvent, NativeMessage, RealtimeCarUpdate, RealtimeUpdate, TrackData
 from racesim.integrations.acc.protocol import SessionPhase, SessionType, enum_name
@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 class AccBridge:
     def __init__(self, cfg: AccBridgeConfig, *, connection_password: str, secret: Optional[bytes],
-                 client_factory: Callable[..., AccBroadcastClient] = AccBroadcastClient):
+                 client_factory: Callable[..., AccBroadcastClient] = AccBroadcastClient,
+                 physics: Optional["PhysicsConfig"] = None, physics_source_factory: Optional[Callable] = None):
         if cfg.target_host is None:
             raise ValueError("acc_bridge.target_host (the Mac's Wi-Fi IPv4 address) must be configured")
         self.cfg = cfg
@@ -50,6 +51,17 @@ class AccBridge:
         self._session_label: Optional[tuple] = None
         self.telemetry_forwarded = 0
         self.events_forwarded = 0
+        # Optional shared-memory physics (separate threads; never blocks the broadcast loop)
+        self.physics_reader = self.physics_forwarder = None
+        if physics is not None and physics.enabled:
+            from racesim.integrations.acc.shared_memory import PhysicsForwarder, PhysicsReader, PyAccSharedMemorySource
+
+            selected = set(physics.channels) if physics.channels else None
+            self.physics_reader = PhysicsReader(physics_source_factory or PyAccSharedMemorySource, sample_hz=physics.sample_hz,
+                                                stale_after_s=physics.reader_stale_after_s, selected=selected)
+            self.physics_forwarder = PhysicsForwarder(self.physics_reader, self.sender, forward_hz=physics.forward_hz,
+                                                      status_interval_s=physics.status_interval_s,
+                                                      session_id_fn=lambda: self.builder.session_id)
 
     # -- callbacks from the client loop -------------------------------------
     def on_message(self, msg: NativeMessage) -> None:
@@ -106,14 +118,24 @@ class AccBridge:
         return {"acc": st.state, "since_last_acc_packet_s": None if age is None else round(age, 2),
                 "acc_messages": st.messages_received, "invalid": st.messages_invalid, "forwarded": self.sender.sent,
                 "send_errors": self.sender.errors, "track": session.track_name, "session": session.session_type,
-                "last_error": st.last_error or self.sender.last_error}
+                "last_error": st.last_error or self.sender.last_error,
+                **({"physics": self.physics_reader.state.status, "physics_samples": self.physics_reader.state.new_samples,
+                    "physics_sent": self.physics_forwarder.sent_samples, "physics_errors": self.physics_reader.state.read_errors}
+                   if self.physics_reader is not None else {})}
 
     # -- lifecycle ------------------------------------------------------------
     def run(self) -> None:
         logger.info("Forwarding to %s:%d as %s (read-only bridge)", *self.sender.target, self.cfg.sender_id)
+        if self.physics_reader is not None:
+            self.physics_reader.start()
+            self.physics_forwarder.start()
+            logger.info("Shared-memory physics forwarding enabled")
         try:
             self.client.run()
         finally:
+            if self.physics_reader is not None:
+                self.physics_forwarder.stop()
+                self.physics_reader.stop()
             self.send_heartbeat()
             self.sender.close()
             logger.info("Bridge stopped. %s", self.status_summary())
