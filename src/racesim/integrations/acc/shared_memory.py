@@ -35,7 +35,7 @@ from enum import Enum
 from typing import Any, Callable, Optional, Protocol
 
 from racesim.integrations.acc.models import PhysicsPayload, utc_now
-from racesim.integrations.acc.physics_channels import AXES, CHANNELS, Channel
+from racesim.integrations.acc.physics_channels import AXES, CHANNELS, DAMAGE_ZONES, Channel, check_value
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +88,24 @@ def _num(v: Any) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
+def _vector(raw: Any) -> Optional[list]:
+    vals = [_num(getattr(raw, a, None)) for a in AXES]
+    return vals if any(v is not None for v in vals) else None
+
+
 def _value(ch: Channel, raw: Any) -> Any:
     if ch.kind == "wheels":
         vals = [_num(getattr(raw, a, None)) for a in WHEEL_ATTRS]
         return vals if any(v is not None for v in vals) else None
     if ch.kind == "vector":
-        vals = [_num(getattr(raw, a, None)) for a in AXES]
+        return _vector(raw)
+    if ch.kind == "wheel_vectors":  # ContactPoint: one Vector3f per wheel
+        vecs = [_vector(getattr(raw, a, None)) for a in WHEEL_ATTRS]
+        if any(v is not None and None in v for v in vecs):  # a partial vector is not a usable point
+            vecs = [None if v is None or None in v else v for v in vecs]
+        return vecs if any(v is not None for v in vecs) else None
+    if ch.kind == "damage":  # CarDamage(front, rear, left, right, center)
+        vals = [_num(getattr(raw, a, None)) for a in DAMAGE_ZONES]
         return vals if any(v is not None for v in vals) else None
     if ch.kind == "enum":
         name = raw.name if isinstance(raw, Enum) else getattr(raw, "name", None)
@@ -117,6 +129,7 @@ class ExtractedSample:
     physics_packet_id: Optional[int]
     graphics_packet_id: Optional[int]
     reader_status: str
+    invalid: dict[str, str] = field(default_factory=dict)
 
 
 def extract_channels(snapshot: Any, selected: Optional[set[str]] = None) -> ExtractedSample:
@@ -124,8 +137,10 @@ def extract_channels(snapshot: Any, selected: Optional[set[str]] = None) -> Extr
 
     A channel is *missing* when its page or attribute is absent or its value
     is non-numeric / non-finite; missing channels are listed, never filled in.
+    A value outside the channel's plausibility range is *invalid*: it is listed
+    with the reason and not forwarded.
     """
-    channels, available, missing = {}, [], []
+    channels, available, missing, invalid = {}, [], [], {}
     for ch in CHANNELS:
         if selected is not None and ch.name not in selected:
             continue
@@ -134,6 +149,10 @@ def extract_channels(snapshot: Any, selected: Optional[set[str]] = None) -> Extr
         value = _value(ch, raw) if raw is not None else None
         if value is None:
             missing.append(ch.name)
+            continue
+        reason = check_value(ch, value)
+        if reason is not None:
+            invalid[ch.name] = reason
         else:
             channels[ch.name] = value
             available.append(ch.name)
@@ -142,7 +161,7 @@ def extract_channels(snapshot: Any, selected: Optional[set[str]] = None) -> Extr
     status = getattr(gfx, "status", None)
     status_name = status.name if isinstance(status, Enum) else (str(status) if status is not None else None)
     return ExtractedSample(channels, available, missing, getattr(phys, "packed_id", None), getattr(gfx, "packed_id", None),
-                           STATUS_MAP.get(status_name or "", "LIVE" if status_name is None else "WAITING_FOR_ACC"))
+                           STATUS_MAP.get(status_name or "", "LIVE" if status_name is None else "WAITING_FOR_ACC"), invalid)
 
 
 @dataclass
@@ -151,6 +170,8 @@ class ReaderState:
     samples_read: int = 0
     new_samples: int = 0
     read_errors: int = 0
+    consecutive_errors: int = 0
+    reopens: int = 0
     last_error: Optional[str] = None
     last_new_sample_t: Optional[float] = None
     sequence: int = 0
@@ -160,12 +181,14 @@ class PhysicsReader:
     """Polls a source in a background thread; holds only the newest sample."""
 
     def __init__(self, source_factory: Callable[[], SharedMemorySource], *, sample_hz: float = 20.0,
-                 stale_after_s: float = 2.0, retry_interval_s: float = 5.0, selected: Optional[set[str]] = None):
+                 stale_after_s: float = 2.0, retry_interval_s: float = 5.0, selected: Optional[set[str]] = None,
+                 reopen_after_errors: int = 20):
         self.source_factory = source_factory
         self.period = 1.0 / sample_hz
         self.stale_after_s = stale_after_s
         self.retry_interval_s = retry_interval_s
         self.selected = selected
+        self.reopen_after_errors = reopen_after_errors
         self.state = ReaderState()
         self.source_name = "acc_shared_memory"
         self._latest: Optional[tuple[ExtractedSample, float, Any, int]] = None  # sample, monotonic t, utc, seq
@@ -222,8 +245,17 @@ class PhysicsReader:
             snap = self._source.read()
         except Exception as exc:  # library raises ValueError on unknown enum values
             self.state.read_errors += 1
+            self.state.consecutive_errors += 1
             self.state.last_error = f"read failed: {exc.__class__.__name__}: {exc}"[:300]
+            if self.state.read_errors == 1 or self.state.read_errors % 100 == 0:  # rate-limited
+                logger.warning("Shared memory %s (%d read errors so far)", self.state.last_error, self.state.read_errors)
+            if self.state.consecutive_errors >= self.reopen_after_errors:
+                logger.warning("Reopening shared memory after %d consecutive read errors", self.state.consecutive_errors)
+                self._close_source()
+                self.state.status, self.state.consecutive_errors = "ERROR", 0
+                self.state.reopens += 1
             return False
+        self.state.consecutive_errors = 0
         self.state.samples_read += 1
         if snap is not None:
             sample = extract_channels(snap, self.selected)
@@ -269,7 +301,8 @@ class PhysicsReader:
         sample, t, utc, seq = latest
         return PhysicsPayload(timestamp_utc=utc, sample_sequence=seq, physics_packet_id=sample.physics_packet_id,
                               graphics_packet_id=sample.graphics_packet_id, channels=sample.channels,
-                              available=sample.available, missing=sample.missing, sample_age_s=max(0.0, now - t), **common)
+                              available=sample.available, missing=sample.missing, invalid=sample.invalid,
+                              sample_age_s=max(0.0, now - t), **common)
 
 
 class PhysicsForwarder:

@@ -5,7 +5,9 @@
   second receiver on the same port.
 * Only the status fragment refreshes (``st.fragment(run_every=...)``); the
   rest of the dashboard is not re-executed.
-* Values are labelled LIVE - MEASURED, DERIVED, UNAVAILABLE, STALE or MOCK.
+* Values are labelled LIVE - MEASURED, DERIVED, UNAVAILABLE, STALE or MOCK
+  (shared-memory physics: LIVE MEASUREMENT, DERIVED, STALE, UNAVAILABLE,
+  INVALID or MOCK).
   Nothing is substituted when no data arrive. Recorded logs are shown only in
   the explicit replay mode and labelled REPLAY.
 """
@@ -28,13 +30,16 @@ from racesim.integrations.acc.health import HealthState
 from racesim.integrations.acc.live_analysis import LiveAnalysis, write_session_exports
 from racesim.integrations.acc.receiver import ReceiverBindError, TelemetryReceiver
 from racesim.integrations.acc.session_logger import SessionLogger, flatten_record, read_session_log
-from racesim.integrations.acc.physics_channels import physics_table
+from racesim.integrations.acc.physics_channels import (BRAKE_WHEEL_CHANNELS, LIVE_MEASUREMENT, MOCK as PH_MOCK,
+                                                       STALE as PH_STALE, TYRE_WHEEL_CHANNELS, UNAVAILABLE, physics_table,
+                                                       quality_summary, wheel_rows)
 from racesim.integrations.acc.state_builder import MOCK, STALE, channel_table
 
 CONFIG_PATH = PROJECT_ROOT / "config" / "acc_bridge.yaml"
 STATE_ICON = {HealthState.CONNECTED: ":material/check_circle:", HealthState.WAITING_FOR_DATA: ":material/hourglass_empty:",
               HealthState.STALE: ":material/warning:", HealthState.DISCONNECTED: ":material/cancel:",
-              HealthState.NOT_STARTED: ":material/radio_button_unchecked:", HealthState.ERROR: ":material/error:"}
+              HealthState.NOT_STARTED: ":material/radio_button_unchecked:", HealthState.ERROR: ":material/error:",
+              HealthState.DEGRADED: ":material/warning:"}
 
 
 class ReceiverManager:
@@ -141,37 +146,104 @@ def _receiver_controls(cfg, mgr: ReceiverManager) -> None:
             st.sidebar.caption(f"Session log: {rx.session_logger.path.relative_to(PROJECT_ROOT) if rx.session_logger.path.is_relative_to(PROJECT_ROOT) else rx.session_logger.path}")
 
 
+def _physics_label(h, mock: bool) -> tuple[str, bool]:
+    stale = h.physics != HealthState.CONNECTED
+    return (PH_MOCK if mock else (PH_STALE if stale else LIVE_MEASUREMENT)), stale
+
+
 def _physics_panel(rx, h) -> None:
-    """Shared-memory physics (only shown once a physics message has arrived)."""
+    """Shared-memory physics, grouped (only shown once a physics message has arrived)."""
     if h.physics == HealthState.NOT_STARTED:
-        st.caption("Physics (shared memory): not received. Start the Windows bridge with --physics to enable it.")
+        msg = "Physics (shared memory): not received. Start the Windows bridge with --physics to enable it."
+        (st.warning if h.physics_expected else st.caption)(msg + (" Overall health is DEGRADED until it arrives."
+                                                                 if h.physics_expected else ""))
         return
     status = rx.latest_physics_status()
     reader = status[0].get("reader_status") if status else None
-    st.markdown(f"**Physics - shared memory** | health {h.physics.value} | Windows reader {reader}"
-                + ("" if h.last_physics_sample_age_s is None else f" | last sample {h.last_physics_sample_age_s:.1f} s ago"))
+    lp = rx.latest_physics()
+    mock = bool(lp[2]) if lp else bool(h.mock)
+    label, stale = _physics_label(h, mock)
+    st.markdown(f"**Physics - shared memory** ({label if lp else UNAVAILABLE}) | health {h.physics.value} | "
+                f"Windows reader {reader}")
+    if mock:
+        st.error("MOCK physics - synthetic values, NOT ACC telemetry.")
     if status and status[0].get("last_error"):
         st.warning(f"Windows reader: {status[0]['last_error']}")
-    lp = rx.latest_physics()
     if lp is None:
-        st.info("No physics samples yet: the Windows reader reports " + str(reader) + " (ACC not running, in the menu or paused).")
+        st.info(f"No physics samples yet: the Windows reader reports {reader} (ACC not running, in the menu or paused).")
         return
-    payload, age, mock = lp
-    stale = h.physics != HealthState.CONNECTED
-    rows = physics_table(payload, mock=mock, stale=stale)
-    k = st.columns(6)
+    payload, age, _ = lp
+    if stale and not mock:
+        st.warning(f"Physics is {h.physics.value}: the newest sample was taken {age:.1f} s ago. Values are not current.")
     c = payload.get("channels", {})
-    for col, (label, key, unit) in zip(k, [("Speed", "speed_kmh", "km/h"), ("RPM", "rpm", ""), ("Throttle", "throttle", ""),
-                                           ("Brake", "brake", ""), ("Fuel (raw, unit disputed)", "fuel_remaining", ""),
-                                           ("Gear (raw)", "gear_raw", "")]):
-        col.metric(label, _fmt(c.get(key), unit))
+    tabs = st.tabs(["Driver inputs", "Vehicle", "Dynamics", "Tyres", "Brakes", "Data quality", "All channels"])
+    with tabs[0]:
+        k = st.columns(4)
+        for col, (title, key) in zip(k, [("Throttle (0-1)", "throttle"), ("Brake (0-1)", "brake"),
+                                         ("Steering input (-1..1, not degrees)", "steering_input"), ("Clutch (0-1)", "clutch")]):
+            col.metric(title, _fmt(c.get(key)))
+        st.caption(f"{label}. Pedals are fractions 0-1, not percentages; steering is a normalised input, not a wheel angle.")
+    with tabs[1]:
+        k = st.columns(6)
+        for col, (title, key, unit) in zip(k, [("Speed", "speed_kmh", "km/h"), ("RPM", "rpm", ""),
+                                               ("Gear (raw ACC index)", "gear", ""), ("Fuel (kg or L, unverified)", "fuel_remaining", ""),
+                                               ("Fuel per lap", "fuel_per_lap_l", "L"), ("Water temp (degC?)", "water_temp", "")]):
+            col.metric(title, _fmt(c.get(key), unit))
+        st.caption(f"{label}. Gear is ACC's raw index (mapping to displayed gear unverified); the fuel unit is disputed "
+                   "(Kunos: kg, library: litres) until checked against the in-game display.")
+    with tabs[2]:
+        rows = [r for r in physics_table(payload, mock=mock, stale=stale, sample_age_s=age) if r["group"] == "dynamics"]
+        st.dataframe(_table(rows), hide_index=True)
+        st.caption("Vectors are [x, y, z]; Kunos does not state the axis orientation. Units marked 'expected' are unverified.")
+    with tabs[3]:
+        st.dataframe(pd.DataFrame(wheel_rows(c, TYRE_WHEEL_CHANNELS)), hide_index=True)
+        st.caption(f"{label}. Compound {c.get('tyre_compound') or 'UNAVAILABLE'}, set {c.get('current_tyre_set', 'UNAVAILABLE')}. "
+                   "Empty cells are unavailable, not zero. Pressure (psi) and temperature (degC) units are expected, not verified.")
+    with tabs[4]:
+        st.dataframe(pd.DataFrame(wheel_rows(c, BRAKE_WHEEL_CHANNELS)), hide_index=True)
+        k = st.columns(3)
+        k[0].metric("Brake bias (raw)", _fmt(c.get("brake_bias")))
+        k[1].metric("ABS activity (raw)", _fmt(c.get("abs_activity")))
+        k[2].metric("TC activity (raw)", _fmt(c.get("tc_activity")))
+        dmg = c.get("car_damage")
+        st.caption(f"{label}. Car damage [front, rear, left, right, center] (raw): "
+                   f"{'UNAVAILABLE' if dmg is None else ', '.join('-' if x is None else f'{x:g}' for x in dmg)}")
+    with tabs[5]:
+        q = quality_summary(payload)
+        k = st.columns(5)
+        k[0].metric("Physics health", h.physics.value)
+        k[1].metric("Sample age", f"{age:.1f} s", help="Since the Windows reader took the sample (includes its age at sending)")
+        k[2].metric("Available channels", f"{q['available']} / {q['defined']}")
+        k[3].metric("Missing / invalid", f"{len(q['missing'])} / {len(q['invalid'])}")
+        k[4].metric("Reader errors", payload.get("read_errors", 0))
+        st.markdown(f"Measured at (Windows reader, UTC): `{payload.get('timestamp_utc')}` | sample #{payload.get('sample_sequence')} | "
+                    f"ACC packet {payload.get('physics_packet_id')} | session {payload.get('session_id') or 'unknown'} | "
+                    f"source `{payload.get('source')}` | overall connection {h.overall.value}")
+        if q["missing"]:
+            st.caption("Missing in this sample: " + ", ".join(q["missing"]))
+        if q["invalid"]:
+            st.warning("Invalid (not shown as measurements): " + "; ".join(f"{k}: {v}" for k, v in q["invalid"].items()))
+        st.caption("Units not yet verified against the game: " + (", ".join(q["unverified_units"]) or "none"))
+    with tabs[6]:
+        st.caption("Values are in native ACC units. unit_status: kunos = stated in Kunos's v1.8.12 document; conflict = sources "
+                   "disagree; unstated = expected unit, not verified; derived = calculated on the Mac.")
+        st.dataframe(_table(physics_table(payload, mock=mock, stale=stale, sample_age_s=age)), hide_index=True)
+
+
+def _table(rows: list[dict]) -> pd.DataFrame:
+    def cell(x):
+        if x is None:
+            return ""
+        if isinstance(x, list):
+            return ", ".join("-" if v is None else (f"[{', '.join(f'{y:.3f}' for y in v)}]" if isinstance(v, list) else f"{v:.3f}")
+                             for v in x)
+        return f"{x:.2f}" if isinstance(x, float) else str(x)
+
     table = pd.DataFrame(rows)
-    table["value"] = table["value"].map(lambda x: "" if x is None else (", ".join("-" if v is None else f"{v:.3f}" for v in x)
-                                                                       if isinstance(x, list) else str(x)))
-    st.caption(f"{len(payload.get('available', []))} measured channels, {len(payload.get('missing', []))} missing in this sample; "
-               "values are in native ACC units. unit_status: kunos = stated in Kunos's v1.8.12 document; conflict = sources "
-               "disagree; unstated = expected unit, not verified; derived = calculated on the Mac.")
-    st.dataframe(table, hide_index=True)
+    for col in ("value", "age_s"):
+        if col in table:
+            table[col] = table[col].map(cell)
+    return table
 
 
 def render_live(mgr: ReceiverManager, refresh_s: float) -> None:
@@ -188,7 +260,8 @@ def render_live(mgr: ReceiverManager, refresh_s: float) -> None:
             st.error("MOCK DATA - NOT LIVE ACC TELEMETRY. Messages are from scripts/send_mock_acc_telemetry.py.")
         st.subheader(f"{h.overall.value}")
         st.caption("Overall is CONNECTED only when the receiver, the Windows bridge (heartbeats), ACC (as reported by "
-                   "the bridge) and the telemetry stream are all fresh.")
+                   "the bridge) and the telemetry stream are all fresh, and - once physics is expected - shared-memory "
+                   "physics is fresh too. DEGRADED: session data current, physics stale or missing.")
         cols = st.columns(4)
         for col, (name, state) in zip(cols, [("Receiver", h.receiver), ("Windows bridge", h.bridge),
                                             ("ACC broadcasting", h.acc), ("Telemetry freshness", h.telemetry)]):

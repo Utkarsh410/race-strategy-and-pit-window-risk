@@ -35,7 +35,7 @@ def test_channel_table_is_consistent():
     assert {c.unit_status for c in CHANNELS} <= {"kunos", "conflict", "unstated", "library"}
     assert BY_NAME["speed_kmh"].unit == "km/h" and BY_NAME["speed_kmh"].unit_status == "kunos"
     assert BY_NAME["fuel_remaining"].unit_status == "conflict"           # Kunos kg vs README litres
-    assert BY_NAME["tyre_pressure"].unit_status == "unstated"            # psi is only expected
+    assert BY_NAME["wheel_pressure"].unit_status == "unstated"            # psi is only expected
     assert BY_NAME["wheel_angular_speed"].unit == "rad/s"
     assert not any("player" in c.attr for c in CHANNELS)                  # names are never read
 
@@ -43,11 +43,11 @@ def test_channel_table_is_consistent():
 def test_extract_channels_and_missing_detection():
     snap = MockSharedMemorySource(drop=("brake_temp", "fuel_per_lap", "track")).read()
     e = extract_channels(snap)
-    assert {"brake_temp", "fuel_per_lap_l", "track"} <= set(e.missing)
-    assert "brake_temp" not in e.channels and len(e.available) + len(e.missing) == len(CHANNELS)
+    assert {"brake_temperature", "fuel_per_lap_l", "track"} <= set(e.missing)
+    assert "brake_temperature" not in e.channels and len(e.available) + len(e.missing) + len(e.invalid) == len(CHANNELS)
     assert e.channels["tyre_compound"] == "dry_compound"                  # NULs stripped
     assert e.channels["status"] == "ACC_LIVE" and e.reader_status == "LIVE"
-    assert len(e.channels["tyre_pressure"]) == 4 and len(e.channels["velocity"]) == 3
+    assert len(e.channels["wheel_pressure"]) == 4 and len(e.channels["velocity"]) == 3
     snap.Physics.rpm = float("nan")
     assert "rpm" in extract_channels(snap).missing                        # non-finite is unavailable, not 0
     snap.Physics.speed_kmh = 0.0
@@ -105,9 +105,9 @@ def test_library_dedup_is_bypassed(monkeypatch):
 def test_payload_validation():
     now = utc_now()
     ok = PhysicsPayload(source="acc_shared_memory", timestamp_utc=now, sample_sequence=1, reader_status="LIVE",
-                        channels={"speed_kmh": 0.0, "tyre_pressure": [27.5, None, 27.4, 27.6], "tyre_compound": "dry_compound"})
+                        channels={"speed_kmh": 0.0, "wheel_pressure": [27.5, None, 27.4, 27.6], "tyre_compound": "dry_compound"})
     assert ok.channels["speed_kmh"] == 0.0
-    bad = [{"made_up_channel": 1.0}, {"tyre_pressure": [1.0, 2.0]}, {"rpm": float("nan")}, {"rpm": True}, {"pit_limiter_on": 1},
+    bad = [{"made_up_channel": 1.0}, {"wheel_pressure": [1.0, 2.0]}, {"rpm": float("nan")}, {"rpm": True}, {"pit_limiter_on": 1},
            {"velocity": [1.0, float("inf"), 0.0]}]
     for ch in bad:
         with pytest.raises(ValidationError):
@@ -157,10 +157,10 @@ def test_dashboard_rows_labels():
     p.poll_once()
     payload = p.build_payload().model_dump(mode="json")
     rows = {r["channel"]: r for r in physics_table(payload, mock=False, stale=False)}
-    assert rows["speed_kmh"]["status"] == "LIVE - MEASURED" and rows["water_temp"]["status"] == "UNAVAILABLE"
+    assert rows["speed_kmh"]["status"] == "LIVE MEASUREMENT" and rows["water_temp"]["status"] == "UNAVAILABLE"
     assert rows["speed_ms"]["status"] == "DERIVED" and rows["speed_ms"]["value"] == pytest.approx(rows["speed_kmh"]["value"] / 3.6)
-    assert rows["tyre_core_temp_spread"]["status"] == "DERIVED"
-    assert {r["status"] for r in physics_table(payload, mock=True, stale=False)} <= {"MOCK - NOT LIVE", "UNAVAILABLE"}
+    assert rows["tyre_core_temperature_spread"]["status"] == "DERIVED"
+    assert {r["status"] for r in physics_table(payload, mock=True, stale=False)} <= {"MOCK", "UNAVAILABLE"}
     assert rows["speed_kmh"]["status"] != "STALE"
     assert physics_table(payload, mock=False, stale=True)[0]["status"] == "STALE"
 

@@ -93,6 +93,9 @@ def _vec(x, y, z):
     return _NS(x=x, y=y, z=z)
 
 
+_contact = _wheels  # ContactPoint has the same per-wheel attributes, holding vectors
+
+
 @dataclass
 class MockSharedMemorySource:
     """Deterministic MOCK snapshots shaped like ``pyaccsharedmemory``'s ``ACC_map``.
@@ -131,7 +134,11 @@ class MockSharedMemorySource:
                    pad_life=_wheels(28.5, 28.5, 28.7, 28.7), disc_life=_wheels(31.8, 31.8, 31.9, 31.9),
                    suspension_travel=_wheels(0.031, 0.030, 0.042, 0.041), suspension_damage=_wheels(0, 0, 0, 0),
                    tc=0.0, abs=0.0, brake_bias=0.56, pit_limiter_on=False, is_ai_controlled=False, air_temp=22.0, road_temp=30.0,
-                   water_temp=88.0, turbo_boost=0.0)
+                   water_temp=88.0, turbo_boost=0.0, is_engine_running=True,
+                   tyre_contact_point=_contact(*(_vec(x, 0.0, z) for x, z in ((0.8, 1.3), (-0.8, 1.3), (0.8, -1.3), (-0.8, -1.3)))),
+                   tyre_contact_normal=_contact(*(_vec(0.0, 1.0, 0.0) for _ in range(4))),
+                   tyre_contact_heading=_contact(*(_vec(0.0, 0.0, 1.0) for _ in range(4))),
+                   car_damage=_NS(front=0.0, rear=0.0, left=0.0, right=0.0, center=0.0))
         gfx = _NS(packed_id=self._i, status=MockAccStatus[self.status], session_type=_NS(name="ACC_PRACTICE"), completed_lap=self._i // 1000,
                   position=1, current_time=int(self._i * 50 % 100_000), last_time=101_234, best_time=100_987,
                   current_sector_index=0, is_in_pit=False, is_in_pit_lane=False, tyre_compound="dry_compound\x00\x00",

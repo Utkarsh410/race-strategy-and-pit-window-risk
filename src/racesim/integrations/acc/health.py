@@ -8,7 +8,18 @@ nothing about ACC itself:
 3. **acc** - what does the bridge report about its own ACC connection?
 4. **telemetry** - how fresh is the latest valid telemetry message?
 
-The overall state is ``CONNECTED`` only when all four are ``CONNECTED``.
+The overall state is ``CONNECTED`` only when all four are ``CONNECTED`` and,
+when shared-memory physics is expected, physics is fresh too. Physics is
+expected once any physics message has arrived in this receiver run (the
+Windows bridge was started with ``--physics``), or from the start with
+``HealthConfig.require_physics``. When the four session components are
+``CONNECTED`` but expected physics is not, overall is ``DEGRADED``: session
+and timing data are current, physics values are not. Broadcast-only setups
+never send physics and keep the original four-component rule.
+
+Physics freshness is measured from when the Windows reader took the sample
+(receive time minus the sample's age at sending), not from when the message
+arrived, so a bridge forwarding an old sample does not look fresh.
 """
 
 from __future__ import annotations
@@ -27,12 +38,13 @@ class HealthState(str, Enum):
     NOT_STARTED = "NOT_STARTED"
     WAITING_FOR_DATA = "WAITING_FOR_DATA"
     CONNECTED = "CONNECTED"
+    DEGRADED = "DEGRADED"        # overall only: session data fresh, expected physics not
     STALE = "STALE"
     DISCONNECTED = "DISCONNECTED"
     ERROR = "ERROR"
 
 
-_SEVERITY = [HealthState.CONNECTED, HealthState.WAITING_FOR_DATA, HealthState.STALE, HealthState.DISCONNECTED,
+_SEVERITY = [HealthState.CONNECTED, HealthState.DEGRADED, HealthState.WAITING_FOR_DATA, HealthState.STALE, HealthState.DISCONNECTED,
              HealthState.NOT_STARTED, HealthState.ERROR]
 
 
@@ -60,8 +72,9 @@ class HealthSnapshot:
     mock: Optional[bool]
     last_error: Optional[str]
     invalid_reasons: dict[str, int] = field(default_factory=dict)
-    # Shared-memory physics (separate component; does not change ``overall``)
+    # Shared-memory physics (separate component; turns a CONNECTED overall into DEGRADED when expected but not fresh)
     physics: HealthState = HealthState.NOT_STARTED
+    physics_expected: bool = False
     physics_reader_status: Optional[str] = None
     last_physics_sample_age_s: Optional[float] = None
     last_physics_message_age_s: Optional[float] = None
@@ -161,7 +174,8 @@ class ConnectionHealth:
 
     def record_valid(self, message_type: str, now: float, *, session_id: Optional[str] = None, mock: bool = False,
                      acc_status: Optional[str] = None, acc_packet_age_s: Optional[float] = None,
-                     physics_reader_status: Optional[str] = None, physics_has_sample: bool = False) -> None:
+                     physics_reader_status: Optional[str] = None, physics_has_sample: bool = False,
+                     physics_sample_age_s: Optional[float] = None) -> None:
         with self._lock:
             self.valid_messages += 1
             self.last_valid_t = now
@@ -178,7 +192,9 @@ class ConnectionHealth:
                 self.last_physics_message_t = now
                 self.physics_reader_status = physics_reader_status
                 if physics_has_sample:
-                    self.last_physics_sample_t = now
+                    measured_t = now - (physics_sample_age_s or 0.0)  # when the Windows reader took it
+                    if self.last_physics_sample_t is None or measured_t > self.last_physics_sample_t:
+                        self.last_physics_sample_t = measured_t
 
     # -- state ----------------------------------------------------------------
     def _freshness(self, age: Optional[float]) -> HealthState:
@@ -229,13 +245,18 @@ class ConnectionHealth:
                 if overall in (HealthState.NOT_STARTED, HealthState.CONNECTED):
                     overall = HealthState.WAITING_FOR_DATA
             physics = self._physics_state(now)
+            expected = self.t.require_physics or self.last_physics_message_t is not None
+            if overall == HealthState.CONNECTED and expected and physics != HealthState.CONNECTED:
+                overall = HealthState.DEGRADED
             return HealthSnapshot(
                 overall, receiver, bridge, acc, telemetry, self._listening, self.packets_received, self.valid_messages,
                 self.invalid_packets, self.duplicates, self.out_of_order, self.gaps, self.last_sequence,
                 _age(now, self.last_valid_t), tel_age, hb_age, self.session_id, self.acc_status,
                 None if self.acc_packet_age_at_heartbeat is None or hb_age is None else self.acc_packet_age_at_heartbeat + hb_age,
-                self.mock, self._error, dict(self.invalid_reasons), physics, self.physics_reader_status,
-                _age(now, self.last_physics_sample_t), _age(now, self.last_physics_message_t))
+                self.mock, self._error, dict(self.invalid_reasons), physics=physics, physics_expected=expected,
+                physics_reader_status=self.physics_reader_status,
+                last_physics_sample_age_s=_age(now, self.last_physics_sample_t),
+                last_physics_message_age_s=_age(now, self.last_physics_message_t))
 
     def _physics_state(self, now: float) -> HealthState:
         """NOT_STARTED until a physics message arrives (broadcast-only setups stay NOT_STARTED).

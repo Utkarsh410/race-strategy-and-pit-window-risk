@@ -293,18 +293,21 @@ synthetic mode is unchanged.
   (BSD-3-Clause). The reference is the C# SDK shipped in the game's
   `sdk\broadcasting` folder.
 * **Limits:** the UDP broadcasting API has no physics channels (fuel, tyres,
-  pedals), so those stay UNAVAILABLE until a Windows shared-memory reader exists,
-  and pit recommendations stay disabled. Real-session evidence so far is practice
+  pedals); those come only from the optional shared-memory physics below, and pit
+  recommendations stay disabled. Real-session evidence so far is practice
   at one track; the tests use deterministic synthetic fixtures.
 
 * **Shared-memory physics (optional, Windows):** `--physics` on the bridge reads ACC's shared
-  memory with `pyaccsharedmemory` 1.0.0 in a separate reader thread and forwards 61 channels
-  (inputs, speed, rpm, fuel, velocity, acceleration, slip, tyre pressure and temperature, brake
-  temperature, suspension, ...). Values stay in native units, and each unit is marked as stated
-  by Kunos, conflicting, or unverified. `scripts/acc_shared_memory_diagnostic.py` prints the
-  live channels on Windows before forwarding is enabled. The Mac shows physics as a separate
-  health component and a labelled panel. Physics is off by default, so broadcast-only setups
-  are unchanged. Not yet verified with a running game.
+  memory with `pyaccsharedmemory` 1.0.0 in a separate reader thread and forwards 66 channels
+  (inputs, speed, rpm, gear, fuel, velocity, acceleration, angular velocity, slip, tyre
+  pressure, core temperature and contact data, brake pressure and temperature, suspension,
+  ABS/TC activity, damage, ...) over the same signed channel (physics schema 1.1). Values stay
+  in native units with range checks, and each unit is marked as stated by Kunos, conflicting,
+  or unverified. `scripts/acc_shared_memory_diagnostic.py` prints the key channels on Windows
+  before forwarding is enabled. The Mac tracks physics freshness separately (overall health is
+  DEGRADED while session data is fresh but physics is not), shows a grouped, labelled panel
+  and can export a physics CSV. Physics is off by default, so broadcast-only setups are
+  unchanged. Not yet verified with a running game.
 * **Calibration from recorded sessions** (`scripts/calibrate_from_acc.py`): replays logs
   through the live lap tracker, converts real (non-mock) laps to RaceSim's lap schema and
   reports, per track and parameter, an estimate or the data still needed (pace,
@@ -662,7 +665,7 @@ With coverage:
 pytest --cov=racesim --cov-report=term
 ```
 
-The suite has 335 tests: the 110 from v1, unchanged, 46 for v2 and 179 for the
+The suite has 353 tests: the 110 from v1, unchanged, 46 for v2 and 197 for the
 ACC integration (`tests/integrations/acc/`). The v1 tests cover configuration validation, data loading and
 validation, tyre/fuel/pit models, the pit window (with a hand-calculated optimum
 that is not the midpoint), strategy generation limits, the optimiser

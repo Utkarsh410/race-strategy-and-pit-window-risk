@@ -29,7 +29,7 @@ from racesim.integrations.acc.auth import load_secret  # noqa: E402
 from racesim.integrations.acc.config import load_acc_config  # noqa: E402
 from racesim.integrations.acc.receiver import ReceiverBindError, TelemetryReceiver  # noqa: E402
 from racesim.integrations.acc.live_analysis import LiveAnalysis, write_session_exports  # noqa: E402
-from racesim.integrations.acc.session_logger import SessionLogger, export_session_csv  # noqa: E402
+from racesim.integrations.acc.session_logger import SessionLogger, export_physics_csv, export_session_csv  # noqa: E402
 
 
 def _physics_brief(rx) -> str:
@@ -38,7 +38,7 @@ def _physics_brief(rx) -> str:
         return "no samples"
     c = lp[0].get("channels", {})
     return (f"{'MOCK ' if lp[2] else ''}speed={c.get('speed_kmh')} rpm={c.get('rpm')} fuel_raw={c.get('fuel_remaining')} "
-            f"tyre_p={c.get('tyre_pressure')} ({len(lp[0].get('available', []))} ch, {lp[1]:.1f}s old)")
+            f"tyre_p={c.get('wheel_pressure')} ({len(lp[0].get('available', []))} ch, {lp[1]:.1f}s old)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,7 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status-interval", type=float, default=2.0)
     ap.add_argument("--duration", type=float, default=None, help="stop automatically after N seconds")
     ap.add_argument("--no-log", action="store_true", help="do not write a session log")
-    ap.add_argument("--csv", action="store_true", help="also export the session log to CSV on exit")
+    ap.add_argument("--csv", action="store_true",
+                    help="also export the session log to CSV on exit (plus <log>_physics.csv when physics samples arrived)")
     ap.add_argument("--insecure-no-auth", action="store_true", help="accept unsigned messages (loopback testing only)")
     ap.add_argument("--log-level", default=None)
     args = ap.parse_args(argv)
@@ -102,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
     finally:
         analysis.finish()
+        h_final = rx.health_snapshot()
         rx.stop()
         if session_logger is not None and session_logger.path is not None:
             log.info("Session log written: %s (%d records)", session_logger.path, session_logger.records_written)
@@ -109,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
                 log.info("Session %s: %s", kind, path)
             if args.csv:
                 log.info("CSV export: %s", export_session_csv(session_logger.path, session_logger.path.with_suffix(".csv")))
+                if h_final.physics.value != "NOT_STARTED":
+                    path, rows = export_physics_csv(session_logger.path,
+                                                    session_logger.path.with_name(session_logger.path.stem + "_physics.csv"))
+                    log.info("Physics CSV export: %s (%d samples)", path, rows)
     return 0
 
 

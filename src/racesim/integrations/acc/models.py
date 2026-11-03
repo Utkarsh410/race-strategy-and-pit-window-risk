@@ -44,7 +44,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SCHEMA_VERSION = "1.0"
 SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0"})
@@ -194,9 +194,10 @@ class EventPayload(_Model):
         return _check_utc(v)
 
 
-PHYSICS_SCHEMA_VERSION = "1.0"
+PHYSICS_SCHEMA_VERSION = "1.1"
+SUPPORTED_PHYSICS_SCHEMA_VERSIONS = {"1.0", "1.1"}
 ReaderStatus = Literal["NOT_AVAILABLE", "WAITING_FOR_ACC", "LIVE", "PAUSED", "REPLAY", "ERROR", "MOCK"]
-ChannelValue = Union[None, bool, int, float, str, list[Optional[float]]]
+ChannelValue = Union[None, bool, int, float, str, list[Optional[float]], list[Optional[list[float]]]]
 
 
 class PhysicsPayload(_Model):
@@ -204,10 +205,20 @@ class PhysicsPayload(_Model):
 
     Added compatibly: broadcast-only bridges never send it, and receivers that
     predate it reject it as an unknown message type without affecting
-    telemetry, heartbeats or events. Channel names, units and their
-    verification status are defined in :mod:`racesim.integrations.acc.physics_channels`;
-    values are in native ACC units. ``available`` / ``missing`` list which
-    channels the reader actually obtained in this sample.
+    telemetry, heartbeats or events. Channel names, units, plausibility ranges
+    and their verification status are defined in
+    :mod:`racesim.integrations.acc.physics_channels`; values are in native ACC
+    units. ``available`` / ``missing`` list which channels the reader obtained
+    in this sample; ``invalid`` maps channels that failed validation to the
+    reason (their values are not forwarded).
+
+    Times: ``timestamp_utc`` is when the Windows reader took the sample from
+    shared memory (ACC itself provides no wall-clock time, only ``packetId``);
+    ``sample_age_s`` is how old that sample was when the message was sent. The
+    Mac records its own receive time separately.
+
+    Schema 1.1 renamed nine 1.0 channels (``LEGACY_NAMES``) and added
+    ``invalid``; 1.0 messages are accepted and renamed on receipt.
     """
 
     physics_schema_version: str = PHYSICS_SCHEMA_VERSION
@@ -221,10 +232,26 @@ class PhysicsPayload(_Model):
     channels: dict[str, ChannelValue] = Field(default_factory=dict)
     available: list[str] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
+    invalid: dict[str, str] = Field(default_factory=dict)
     samples_read: int = Field(default=0, ge=0)
     read_errors: int = Field(default=0, ge=0)
     sample_age_s: Optional[float] = Field(default=None, ge=0, le=3600)
     last_error: Optional[str] = Field(default=None, max_length=300)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("physics_schema_version") == "1.0":
+            from racesim.integrations.acc.physics_channels import LEGACY_NAMES
+
+            data = dict(data)
+            ren = lambda n: LEGACY_NAMES.get(n, n)  # noqa: E731
+            if isinstance(data.get("channels"), dict):
+                data["channels"] = {ren(k): v for k, v in data["channels"].items()}
+            for key in ("available", "missing"):
+                if isinstance(data.get(key), list):
+                    data[key] = [ren(n) if isinstance(n, str) else n for n in data[key]]
+        return data
 
     @field_validator("timestamp_utc")
     @classmethod
@@ -234,38 +261,25 @@ class PhysicsPayload(_Model):
     @field_validator("physics_schema_version")
     @classmethod
     def _pversion(cls, v: str) -> str:
-        if v != PHYSICS_SCHEMA_VERSION:
+        if v not in SUPPORTED_PHYSICS_SCHEMA_VERSIONS:
             raise ValueError(f"unsupported physics schema version {v!r}")
         return v
 
-    @field_validator("channels")
-    @classmethod
-    def _channels(cls, v: dict) -> dict:
-        import math
+    @model_validator(mode="after")
+    def _channels(self) -> "PhysicsPayload":
+        """Unknown channels and wrong shapes/types reject the message (a protocol fault);
+        out-of-range values are moved to ``invalid`` so the rest of the sample is kept."""
+        from racesim.integrations.acc.physics_channels import split_invalid
 
-        from racesim.integrations.acc.physics_channels import BY_NAME
-
-        for name, value in v.items():
-            ch = BY_NAME.get(name)
-            if ch is None:
-                raise ValueError(f"unknown physics channel {name!r}")
-            if value is None:
-                continue
-            if ch.kind in ("wheels", "vector"):
-                n = 4 if ch.kind == "wheels" else 3
-                if not isinstance(value, list) or len(value) != n:
-                    raise ValueError(f"{name} must be a list of {n} values")
-                if any(x is not None and (isinstance(x, bool) or not math.isfinite(x)) for x in value):
-                    raise ValueError(f"{name} contains a non-finite value")
-            elif ch.kind in ("text", "enum"):
-                if not isinstance(value, str) or len(value) > 64:
-                    raise ValueError(f"{name} must be a short string")
-            elif ch.kind == "bool":
-                if not isinstance(value, bool):
-                    raise ValueError(f"{name} must be a boolean")
-            elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ValueError(f"{name} must be a finite number")
-        return v
+        valid, invalid = split_invalid(self.channels)
+        for name, reason in invalid.items():
+            if not reason.startswith("out of range"):
+                raise ValueError(f"{name}: {reason}")
+        if invalid:
+            self.channels = valid
+            self.invalid = {**self.invalid, **invalid}
+            self.available = [n for n in self.available if n not in invalid]
+        return self
 
 
 PAYLOAD_MODELS: dict[str, type[_Model]] = {"telemetry": TelemetryPayload, "heartbeat": HeartbeatPayload, "event": EventPayload,

@@ -1,12 +1,15 @@
 """Print live ACC shared-memory channels on the Windows PC (no network).
 
 Run this BEFORE enabling forwarding, with ACC running and a session loaded:
-    python scripts\\acc_shared_memory_diagnostic.py                 # refresh every second
+    python scripts\\acc_shared_memory_diagnostic.py                 # key channels, refresh every second
+    python scripts\\acc_shared_memory_diagnostic.py --full          # every channel with unit and unit status
     python scripts\\acc_shared_memory_diagnostic.py --once --json   # one sample as JSON
     python scripts/acc_shared_memory_diagnostic.py --mock --count 3  # MOCK source, works on any OS
 
-For each channel it prints the value, the unit and how far that unit is
-verified (kunos / conflict / unstated / library). Compare 'unstated' and
+The default view prints speed, rpm, gear, throttle, brake, fuel and the four
+tyre pressures and core temperatures, in native ACC units. ``--full`` prints
+every channel with its unit and how far that unit is verified
+(kunos / conflict / unstated / library). Compare 'unstated' and
 'conflict' channels with the in-game displays (e.g. fuel, tyre pressures and
 temperatures) and note the result. Missing channels are listed explicitly.
 """
@@ -35,6 +38,24 @@ def fmt(v) -> str:
     return str(v)
 
 
+BRIEF = (("speed_kmh", "Speed", "km/h"), ("rpm", "RPM", ""), ("gear", "Gear (raw ACC index)", ""),
+         ("throttle", "Throttle (0-1)", ""), ("brake", "Brake (0-1)", ""), ("fuel_remaining", "Fuel (kg or L - verify)", ""),
+         ("wheel_pressure", "Tyre pressure FL FR RL RR (psi?)", ""),
+         ("tyre_core_temperature", "Tyre core temp FL FR RL RR (degC?)", ""))
+
+
+def brief_lines(p) -> list[str]:
+    """Key channels for a quick check; '-' means unavailable, never zero."""
+    out = []
+    for name, label, unit in BRIEF:
+        v = p.channels.get(name)
+        text = "UNAVAILABLE" if v is None else (fmt(v) + (f" {unit}" if unit else ""))
+        if name in p.invalid:
+            text = f"INVALID ({p.invalid[name]})"
+        out.append(f"  {label:<36} {text}")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mock", action="store_true", help="use the MOCK source (no ACC needed; synthetic values)")
@@ -42,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--count", type=int, default=None, help="number of refreshes (default: until Ctrl+C)")
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    ap.add_argument("--full", action="store_true", help="print every channel with its unit and unit status")
     args = ap.parse_args(argv)
     reader = PhysicsReader(MockSharedMemorySource if args.mock else PyAccSharedMemorySource)
     n = 1 if args.once else args.count
@@ -59,7 +81,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"\n=== {'MOCK - NOT ACC' if args.mock else 'ACC shared memory'} | reader status {p.reader_status} | "
                       f"packet {p.physics_packet_id} | samples {p.samples_read} | errors {p.read_errors}"
                       + (f" | last error: {p.last_error}" if p.last_error else ""))
-                if p.channels:
+                if p.channels and not args.full:
+                    print("\n".join(brief_lines(p)))
+                    if p.invalid:
+                        print(f"invalid ({len(p.invalid)}): " + ", ".join(f"{k}: {v}" for k, v in p.invalid.items())[:300])
+                elif p.channels:
                     print(f"{'channel':<24} {'value':<38} {'unit':<40} unit status")
                     for ch in CHANNELS:
                         if ch.name in p.channels:
@@ -67,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"available: {len(p.available)}  missing ({len(p.missing)}): {', '.join(p.missing) or 'none'}")
                     print("Check 'conflict'/'unstated' units against the in-game display: "
                           + ", ".join(c.name for c in CHANNELS if c.unit_status in ('conflict', 'unstated') and c.name in p.channels)[:300])
+                elif p.reader_status in ("NOT_AVAILABLE", "ERROR"):
+                    print("Shared memory cannot be read here (see last error). It works only on the Windows PC running ACC.")
                 else:
                     print("No sample yet. Start ACC and load a session (driving or spectating); the main menu has no data.")
             if n is None or i < n:

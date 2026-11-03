@@ -431,84 +431,212 @@ Assumptions the calibration makes:
 The UDP broadcasting API has no physics, fuel or tyre channels. ACC also
 publishes them through Windows **shared memory** (`Local\acpmf_physics`,
 `acpmf_graphics`, `acpmf_static`). Shared memory can only be read on the PC
-running ACC, so the bridge reads it there and forwards selected samples to the
-Mac as a new `physics` message type.
+running ACC, so the bridge reads it there and forwards samples to the Mac over
+the **same authenticated UDP channel** (one sender, one HMAC secret, one
+sequence counter, one receiver), as the message type `physics`.
 
 ```
 ACC ─ shared memory ─▶ reader thread (20 Hz, memory only) ─▶ newest sample ─▶ forwarder thread (5 Hz) ─┐
 ACC ─ UDP broadcast ─▶ broadcast client (main thread) ─────────────────────────────────────────────────┴▶ BridgeSender ─▶ Mac
 ```
 
-* **Library:** [`pyaccsharedmemory`](https://github.com/rrennoir/PyAccSharedMemory)
-  1.0.0 (MIT, released 2022-09-19, Windows only). RaceSim was checked against
-  its source (`src/pyaccsharedmemory.py`): `accSharedMemory().read_shared_memory()`
-  and `close()`, and the `Physics` / `Graphics` / `Static` attribute names.
-* **Library behaviours handled:**
-  * Its "unchanged frame" check compares only `suspension_travel`, so it drops
-    every sample while the car is stationary. RaceSim disables that check and
-    de-duplicates on ACC's physics `packetId` instead.
-  * An unknown enum value makes the library raise for the whole read. RaceSim
-    counts it as a read error and keeps going.
-* **Units:** from Kunos's *ACC Shared Memory Documentation v1.8.12* (in the
-  library repository). Values are forwarded **in native units**. Every channel
-  has a `unit_status`:
-  * `kunos`: the unit is stated by Kunos.
-  * `conflict`: the sources disagree. For example, Kunos says `fuel` is kg, the
-    library README says litres, and Kunos gives fuel-per-lap in litres.
-  * `unstated`: the expected unit is shown but not verified, for example tyre
-    pressure in psi or temperatures in °C.
-  * `library`: stated only by the library README.
-* **Compatibility:**
-  * Physics is **off by default**; enable it with `--physics` or
-    `physics.enabled: true`.
-  * Broadcast-only setups are unchanged, and heartbeats are untouched.
-  * Update the **Mac receiver first**: an older receiver rejects `physics`
-    messages but keeps receiving telemetry.
-* **Health:** the Mac reports a separate *physics* component, using the reader
-  status sent from Windows:
-  * `NOT_STARTED`: no physics messages received yet;
-  * `WAITING_FOR_DATA`: ACC is off, in the menu, paused or in a replay;
-  * `CONNECTED`: new samples are arriving;
-  * `STALE` / `DISCONNECTED`: physics messages have stopped arriving;
-  * `ERROR`: shared memory is unavailable or the reader reports an error.
+### Design: why physics is its own message, and where the two are combined
 
-  The overall broadcast status is computed exactly as before.
-* **Privacy:** player names, other cars' coordinates and fields Kunos marks as
-  unused are not read.
-* **Mock data:** a mock physics source can never pass as live. If the envelope
-  is live and the payload says mock (or the reverse), the receiver rejects it.
+* **Separate message, same channel.** Session/timing data (`telemetry`) and
+  physics (`physics`) travel as separate signed messages through the same
+  sender. The `telemetry` payload is not extended, because receivers validate
+  it strictly (`extra="forbid"`): a physics section inside it would make every
+  older receiver reject *all* telemetry. A separate type means an older
+  receiver rejects only the physics messages and keeps working.
+* **Combined on the Mac.** Each physics sample carries the bridge's current
+  `session_id`. The receiver pairs it with the newest session data and keeps
+  the two freshnesses apart:
+  * `telemetry` health follows the UDP-broadcast stream;
+  * `physics` health follows the newest physics sample, timed from when the
+    Windows reader **took** it (receive time minus the sample's age at
+    sending), not from when it arrived.
+* **Independent sources.** The bridge keeps forwarding session data when
+  shared memory fails, and keeps sending physics *status* messages (about
+  once a second) while there are no new samples. The Mac can therefore tell
+  "ACC not in a session" from "bridge down".
+* **No duplicate or invalid samples:**
+  * The reader de-duplicates on ACC's physics `packetId`.
+  * The forwarder sends each sample once.
+  * The receiver ignores a sample older than the one it holds.
+  * Values outside a channel's plausibility range are listed under `invalid`
+    with the reason, and are never forwarded or shown as measurements.
+* **Timestamps.** ACC's shared memory has no wall-clock time, only
+  `packetId`. Three times are recorded separately:
+  * `timestamp_utc`: when the Windows reader took the sample;
+  * `sample_age_s`: how old the sample was when it was sent;
+  * the Mac's own `received_at_utc`.
+* **Schema.** `physics_schema_version` 1.1. It renamed the nine 1.0 channels
+  below to the integration's target names and added `invalid`. 1.0 messages,
+  logs and config channel lists are still accepted, and are renamed on
+  receipt.
+* **Target names not used yet:** `fuel_l`. The fuel value stays
+  `fuel_remaining` until a live session shows whether ACC reports kg (Kunos)
+  or litres (library README); a name must not claim an unverified unit.
+  `gear` is ACC's raw gear index, not the gear shown on the dash.
+
+| 1.0 name | 1.1 name |
+|---|---|
+| `steering` | `steering_input` |
+| `gear_raw` | `gear` |
+| `acceleration_g` | `acceleration` |
+| `local_angular_velocity` | `angular_velocity` |
+| `tyre_pressure` | `wheel_pressure` |
+| `tyre_core_temp` | `tyre_core_temperature` |
+| `brake_temp` | `brake_temperature` |
+| `abs_in_action` | `abs_activity` |
+| `tc_in_action` | `tc_activity` |
+
+### Library
+
+* [`pyaccsharedmemory`](https://github.com/rrennoir/PyAccSharedMemory) **1.0.0**,
+  pinned in `requirements-acc-bridge.txt` (Windows only):
+  * MIT licence;
+  * pure Python (`mmap` + `struct`), no binaries;
+  * classifiers list Python 3.8–3.10.
+* **Maintenance (checked 2026-11-03):** the only releases (0.0.1, 0.0.2 and
+  1.0.0) were all published on 2022-09-19, with no commits since. Five issues
+  are open. One of them (#6) is the packet-id de-duplication bug handled
+  below. RaceSim was checked against the library's source
+  (`src/pyaccsharedmemory.py`): `accSharedMemory().read_shared_memory()` and
+  `close()`, and the `Physics` / `Graphics` / `Static` attribute names
+  (`ContactPoint`, `CarDamage`, `Wheels`, `Vector3f`).
+* **ACC version:** the struct layout follows Kunos's v1.8.12 document. In
+  2022 a user reported physics reading as zero after an ACC update; it turned
+  out to be their own error (issue #3). Whether 1.0.0 matches the **current**
+  ACC build has not been checked. The diagnostic below shows it: watch the
+  `sm_version` / `ac_version` channels and whether the values look right.
+* **Library behaviours handled:**
+  * Its "unchanged frame" check compares only `suspension_travel` (and never
+    updates `last_physicsID`), so it drops every sample while the car is
+    stationary. RaceSim clears that check before each read and de-duplicates
+    on ACC's physics `packetId` instead.
+  * An unknown enum value makes the library raise for the whole read. RaceSim
+    counts it as a read error (logged at most once per 100 errors). After 20
+    consecutive failures it closes and reopens the shared memory.
+  * Strings are NUL-padded; RaceSim strips them.
+* **If the library proves incompatible:** the reader depends only on the small
+  `SharedMemorySource` protocol (`read()` / `close()`). A replacement reader,
+  for example a vendored `ctypes` struct, can be swapped in without touching
+  the bridge, the protocol or the Mac.
+
+### Units, ranges and semantics
+
+* Values are forwarded **in native units**. Every channel has a
+  `unit_status`:
+  * `kunos`: the unit is stated by Kunos;
+  * `conflict`: the sources disagree. For example, Kunos says `fuel` is kg, the
+    library README says litres, and Kunos gives fuel-per-lap in litres;
+  * `unstated`: the expected unit is shown but not verified, for example tyre
+    pressure in psi or temperatures in °C;
+  * `library`: stated only by the library README.
+* **Unavailable vs zero.** An absent value or an empty CSV cell means
+  *unavailable*; `0` is a real reading (for example, a stationary car's
+  `speed_kmh`).
+* **Ranges.** Ranges are set only where the bound holds whatever the
+  unverified unit turns out to be: pedals 0–1, steering −1–1, speed 0–500,
+  rpm 0–30 000, and so on.
+* **Semantics.** Pedals are fractions, not percentages. `steering_input` is a
+  normalised input, not a wheel angle in degrees. `abs_activity` /
+  `tc_activity` are raw activity levels, not the aid settings.
+* **Coordinates.** Vectors are `[x, y, z]`, and per-wheel values are
+  `[FL, FR, RL, RR]`. Kunos names a global and a car-local frame but does not
+  state the axis orientation of either.
+
+### Health
+
+The Mac reports a separate **physics** component:
+
+* `NOT_STARTED`: no physics messages received yet;
+* `WAITING_FOR_DATA`: ACC is off, in the menu, paused or in a replay;
+* `CONNECTED`: new samples are fresh;
+* `STALE` / `DISCONNECTED`: physics messages have stopped arriving;
+* `ERROR`: shared memory is unavailable or the reader reports an error.
+
+The **overall** state accounts for physics once it is expected, that is once
+any physics message has arrived in this receiver run. Set
+`health.require_physics: true` to expect it from the start. If the session
+components are all `CONNECTED` but the expected physics is not, overall is
+**`DEGRADED`**: session and timing data are current, physics is not. The
+integration is never reported fully healthy in that state. Broadcast-only
+setups never send physics and keep the original four-component rule.
+
+On a new ACC session (the telemetry `session_id` changes), the receiver drops
+the previous session's physics sample. When the bridge restarts (a new
+sender run), the sample held from the old run is dropped too.
+
+### Logging and export
+
+* Every physics message is written to the session JSONL as the raw signed
+  envelope plus the Mac receive time and quality flags. Each record keeps:
+  * session id, sample sequence and ACC packet ids;
+  * the Windows sampling time;
+  * the available / missing / invalid channels.
+* Quality flags include:
+  * `physics_without_session`: physics arrived before any session data;
+  * `physics_session_mismatch`;
+  * `physics_invalid_channels`;
+  * `physics_sample_older`.
+* Logs are opened in exclusive-create mode and never overwritten.
+* **Physics CSV** (one row per sample; wheels `_fl/_fr/_rl/_rr`, vectors
+  `_x/_y/_z`). The export streams the log, so memory use stays flat, and it
+  refuses to overwrite an existing CSV.
+  * When a receiver run ends: `acc_mac_receiver.py --csv` writes
+    `<log>_physics.csv` if physics arrived.
+  * From an existing log:
+
+    ```bash
+    python scripts/analyse_acc_session.py <log.jsonl> --physics-csv
+    ```
+
+    Add `--physics-channels speed_kmh,rpm,wheel_pressure` to choose channels.
+* Size: physics messages are about 3 KB each, so at 5 Hz the session log
+  grows by roughly 50 MB per hour.
 
 ### Windows: install, verify locally, then forward
 
-1. Install the optional dependency in the bridge's environment:
+1. Install the optional dependency in the bridge's existing environment:
 
    ```bash
    pip install -r requirements-acc-bridge.txt
    ```
 
-   This installs `pyaccsharedmemory==1.0.0` on Windows only. The library's
-   classifiers list Python 3.8–3.10; it has not yet been checked on the newer
-   Python the bridge uses, which step 2 verifies.
-2. **Verify locally first (no network):** start ACC, load a session, and run:
+   This installs `pyaccsharedmemory==1.0.0` on Windows only. Nothing changes
+   on the Mac.
+2. **Verify locally first (no network):** start ACC, load a session (driving),
+   and run:
 
    ```bash
    python scripts\acc_shared_memory_diagnostic.py
    ```
 
-   It prints every channel with its value, unit and unit status, plus a list of
-   missing channels, once per second. Check:
+   Once per second it prints speed, rpm, gear, throttle, brake, fuel, the four
+   tyre pressures and the four tyre core temperatures, in native units.
+   `UNAVAILABLE` and `INVALID` are shown explicitly. Check:
    * `reader status` is `LIVE` and the `packet` number increases;
-   * `speed_kmh`, `rpm`, `throttle` and `brake` respond to your inputs;
-   * compare `fuel_remaining` with the in-game fuel (this settles the kg/litres
-     question), `tyre_pressure` with the in-game pressures, and
-     `tyre_core_temp` / `brake_temp` with the in-game temperatures;
-   * write down how `gear_raw` maps to the gears shown in the game.
+   * speed, rpm, throttle and brake respond to your inputs;
+   * fuel matches the in-game fuel. Write down whether it is kg or litres:
+     this settles the `fuel_remaining` / `fuel_l` question;
+   * the pressures and core temperatures match the in-game tyre display
+     (psi? °C?);
+   * how `Gear` maps to the gear shown in the game.
 
-   For a single JSON sample:
+   Two more views:
+   * every channel with its unit and unit status:
 
-   ```bash
-   python scripts\acc_shared_memory_diagnostic.py --once --json
-   ```
+     ```bash
+     python scripts\acc_shared_memory_diagnostic.py --full
+     ```
+
+   * a single JSON sample:
+
+     ```bash
+     python scripts\acc_shared_memory_diagnostic.py --once --json
+     ```
 
 3. **Then enable forwarding:**
 
@@ -516,12 +644,15 @@ ACC ─ UDP broadcast ─▶ broadcast client (main thread) ──────�
    python scripts\acc_windows_bridge.py --target-host <MAC_WIFI_IP> --physics
    ```
 
-   Add `--physics-hz 10` to change the rate. The bridge status line adds the
-   physics reader state, samples read, samples sent and read errors.
+   Add `--physics-hz 10` to change the rate (`physics.sample_hz` /
+   `forward_hz` in the config). The bridge status line adds the physics reader
+   state, samples read, samples sent and read errors.
 
 ### macOS: receive and display
 
-1. Run the receiver (or use the dashboard page *ACC Live Telemetry*):
+1. Update the Mac first, or both sides together. A 1.0-only receiver rejects
+   1.1 physics messages, but its telemetry is unaffected.
+2. Run the receiver, or use the dashboard page *ACC Live Telemetry*:
 
    ```bash
    python scripts/acc_mac_receiver.py --host 0.0.0.0 --port 9100
@@ -529,99 +660,139 @@ ACC ─ UDP broadcast ─▶ broadcast client (main thread) ──────�
 
    The status line adds `physics=<state> reader=<Windows reader status>`, plus
    speed, rpm, raw fuel and tyre pressures.
-2. On the dashboard, the **Physics - shared memory** panel lists every channel
-   as LIVE - MEASURED, DERIVED (calculated on the Mac: `speed_ms`,
-   `tyre_core_temp_spread`, `tyre_pressure_spread`), UNAVAILABLE, STALE or
-   MOCK.
-3. **Mock test without ACC:**
+3. On the dashboard, the **Physics - shared memory** panel has tabs:
+   * *Driver inputs*;
+   * *Vehicle*;
+   * *Dynamics*;
+   * *Tyres*, a per-wheel table;
+   * *Brakes*, per wheel, plus bias, ABS, TC and damage;
+   * *Data quality*: health, sample age, measurement time, available / missing
+     / invalid channels, reader errors, session, connection status, and the
+     units still unverified;
+   * *All channels*.
+
+   Values are labelled:
+   * **LIVE MEASUREMENT**;
+   * **DERIVED**, calculated on the Mac: `speed_ms`,
+     `tyre_core_temperature_spread`, `wheel_pressure_spread`;
+   * **STALE**;
+   * **UNAVAILABLE**;
+   * **INVALID**;
+   * **MOCK**.
+4. **Mock test without ACC:**
 
    ```bash
    python scripts/send_mock_acc_telemetry.py --physics --insecure-no-auth
    ```
 
-   Pair it with `acc_mac_receiver.py --insecure-no-auth`.
-
-Physics messages are about 2.8 KB each at 5 Hz, roughly 50 MB per hour in the
-session log.
+   Pair it with `acc_mac_receiver.py --insecure-no-auth`. The diagnostic also
+   has a `--mock` mode that runs on any OS.
 
 ### Testing status
 
-* **Tested without ACC (automated):**
-  * channel extraction and missing-channel detection;
-  * the library workaround, tested against a fake module that reproduces its
+Mock tests and real-ACC verification are kept separate. Passing the first says
+nothing about the second.
+
+* **Verified with mock / fake sources (automated, 36 physics tests; full suite
+  353 passing on macOS):**
+  * extraction of every channel kind (scalars, wheels, vectors, contact points,
+    damage), and missing-channel detection;
+  * range checks, unavailable vs zero, and acceptance plus renaming of schema
+    1.0;
+  * the library workaround, against a fake module that reproduces its
     behaviour;
-  * the reader's de-duplication, stale handling and error handling;
-  * forwarding, UDP reception and health states;
-  * clean shutdown of the bridge's threads;
-  * rejection of mock data presented as live;
-  * the dashboard labels, and the diagnostic command in `--mock` mode.
-* **Not yet tested:** reading real shared memory on Windows with ACC running,
-  the actual units (fuel, pressures, temperatures, gear encoding), library
-  behaviour on Python 3.11+, and the end-to-end path from Windows to the Mac
-  dashboard. Follow the three steps above in order and record the results.
+  * reader de-duplication, staleness, read errors and reopening after repeated
+    failures;
+  * forwarding and UDP reception;
+  * health: session without physics, stale physics → `DEGRADED`, sample-age
+    timing, physics without session, and `require_physics`;
+  * session change, bridge restart and older-sample handling;
+  * UDP-only backward compatibility;
+  * JSONL logging and the physics CSV, including legacy logs and the
+    no-overwrite rule;
+  * clean shutdown of the bridge's threads, and rejection of mock data
+    presented as live;
+  * the dashboard rows, and the diagnostic in `--mock` mode. The dashboard
+    panel itself was rendered headlessly with mock data (Streamlit `AppTest`),
+    not in a browser.
+* **Not yet verified (needs the Windows PC with ACC running):**
+  * reading real shared memory with `pyaccsharedmemory` 1.0.0 on the bridge's
+    Python version and the current ACC build;
+  * the actual units (fuel kg/L, pressures, temperatures) and the gear
+    encoding;
+  * whether the plausibility ranges hold for real data;
+  * the end-to-end path from Windows to the Mac dashboard.
+
+  Follow the three Windows steps above in order and record the results. Until
+  then the live physics integration is **not** complete.
 
 ### Channels and units
 
-| Channel | ACC field | Unit | Unit status | Meaning |
-|---|---|---|---|---|
-| `throttle` | physics.gas | fraction 0-1 | kunos | Gas pedal input |
-| `brake` | physics.brake | fraction 0-1 | kunos | Brake pedal input |
-| `clutch` | physics.clutch | fraction 0-1 | kunos | Clutch pedal input |
-| `steering` | physics.steerAngle | -1 to 1 | conflict | Steering input; Kunos: -1.0 to 1.0, library README: 0.0 to 1.0 |
-| `gear_raw` | physics.gear | raw integer | unstated | Current gear; encoding not stated (AC convention 0=R, 1=N, 2=1st is unverified for ACC) |
-| `rpm` | physics.rpm | rpm | kunos | Engine revolutions per minute |
-| `speed_kmh` | physics.speedKmh | km/h | kunos | Car speed |
-| `water_temp` | physics.waterTemp | degC (expected) | unstated | Water temperature |
-| `turbo_boost` | physics.turboBoost | raw | unstated | Car turbo level |
-| `fuel_remaining` | physics.fuel | kg (Kunos) / litres (library README) | conflict | Fuel remaining; Kunos says kg, library README says litres - check against the in-game fuel display |
-| `fuel_per_lap_l` | graphics.fuelXLap | litres/lap | kunos | Average fuel consumed per lap |
-| `fuel_estimated_laps` | graphics.fuelEstimatedLaps | laps | kunos | Laps possible with current fuel |
-| `used_fuel` | graphics.usedFuel | litres (expected) | unstated | Fuel used since last refuelling |
-| `max_fuel` | static.maxFuel | litres (expected) | unstated | Maximum fuel tank capacity |
-| `velocity` | physics.velocity | m/s (expected) | unstated | Velocity vector, global coordinates |
-| `local_velocity` | physics.localVelocity | m/s (expected) | unstated | Velocity vector, car coordinates |
-| `acceleration_g` | physics.accG | G (expected) | unstated | Acceleration vector, global coordinates |
-| `local_angular_velocity` | physics.localAngularVel | rad/s (expected) | unstated | Angular velocity, car coordinates |
-| `heading` | physics.heading | rad (expected) | unstated | Car yaw orientation |
-| `pitch` | physics.pitch | rad (expected) | unstated | Car pitch orientation |
-| `roll` | physics.roll | rad (expected) | unstated | Car roll orientation |
-| `wheel_slip` | physics.wheelSlip | dimensionless (expected) | unstated | Tyre slip |
-| `slip_ratio` | physics.slipRatio | "radians" per Kunos (dimensionless expected) | conflict | Tyre slip ratio; Kunos labels it 'in radians', which is unusual for a ratio |
-| `slip_angle` | physics.slipAngle | rad (expected) | unstated | Tyre slip angle |
-| `wheel_angular_speed` | physics.wheelAngularSpeed | rad/s | kunos | Wheel angular speed |
-| `tyre_pressure` | physics.wheelPressure | psi (expected) | unstated | Tyre pressure |
-| `tyre_core_temp` | physics.TyreCoreTemp | degC (expected) | unstated | Tyre rubber core temperature |
-| `brake_temp` | physics.brakeTemp | degC (expected) | unstated | Brake disc temperature |
-| `brake_pressure` | physics.brakePressure | raw (car-specific dash coefficient, Kunos appendix) | kunos | Brake pressure |
-| `pad_life` | physics.padLife | mm (library README: starts at 29 mm) | library | Brake pad wear |
-| `disc_life` | physics.discLife | mm (library README: starts at 32 mm) | library | Brake disc wear |
-| `suspension_travel` | physics.suspensionTravel | m (expected) | unstated | Suspension travel |
-| `suspension_damage` | physics.suspensionDamage | raw | unstated | Suspension damage level |
-| `tc_in_action` | physics.tc | raw | unstated | Traction control in action |
-| `abs_in_action` | physics.abs | raw | unstated | ABS in action |
-| `brake_bias` | physics.brakeBias | raw (Kunos appendix 4) | kunos | Front brake bias |
-| `pit_limiter_on` | physics.pitLimiterOn | - | kunos | Pit limiter on |
-| `is_ai_controlled` | physics.isAIControlled | - | kunos | Car is controlled by the AI |
-| `air_temp` | physics.airTemp | degC (expected) | unstated | Air temperature |
-| `road_temp` | physics.roadTemp | degC (expected) | unstated | Road temperature |
-| `status` | graphics.status | - | kunos | ACC_STATUS (OFF/REPLAY/LIVE/PAUSE) |
-| `session_type` | graphics.session | - | kunos | ACC_SESSION_TYPE |
-| `completed_laps` | graphics.completedLaps | laps | kunos | Completed laps |
-| `position` | graphics.position | - | kunos | Current player position |
-| `current_lap_time_ms` | graphics.iCurrentTime | ms | kunos | Current lap time |
-| `last_lap_time_ms` | graphics.iLastTime | ms | kunos | Last lap time |
-| `best_lap_time_ms` | graphics.iBestTime | ms | kunos | Best lap time |
-| `current_sector_index` | graphics.currentSectorIndex | - | kunos | Current track sector |
-| `is_in_pit` | graphics.isInPit | - | kunos | Car is pitting |
-| `is_in_pit_lane` | graphics.isInPitLane | - | kunos | Car is in pit lane |
-| `tyre_compound` | graphics.tyreCompound | - | kunos | Tyre compound used |
-| `current_tyre_set` | graphics.currentTyreSet | - | kunos | Tyre set currently in use |
-| `track_grip_status` | graphics.trackGripStatus | - | kunos | ACC_TRACK_GRIP_STATUS |
-| `rain_intensity` | graphics.rainIntensity | - | kunos | ACC_RAIN_INTENSITY |
-| `flag` | graphics.flag | - | kunos | ACC_FLAG_TYPE |
-| `session_time_left` | graphics.sessionTimeLeft | ms (expected) | unstated | Session time left |
-| `car_model` | static.carModel | - | kunos | Player car model (Kunos id) |
-| `track` | static.track | - | kunos | Track name |
-| `max_rpm` | static.maxRpm | rpm | kunos | Maximum rpm |
-| `sm_version` | static.smVersion | - | kunos | Shared memory version |
-| `ac_version` | static.acVersion | - | kunos | ACC version |
+| Channel | Group | ACC field | Unit | Unit status | Valid range | Meaning |
+|---|---|---|---|---|---|---|
+| `throttle` | inputs | physics.gas | fraction 0-1 | kunos | 0 to 1 | Gas pedal input (not a percentage) |
+| `brake` | inputs | physics.brake | fraction 0-1 | kunos | 0 to 1 | Brake pedal input (not a percentage) |
+| `clutch` | inputs | physics.clutch | fraction 0-1 | kunos | 0 to 1 | Clutch pedal input |
+| `steering_input` | inputs | physics.steerAngle | normalised -1 to 1 (not degrees) | conflict | -1 to 1 | Steering input as a fraction of full lock, NOT a wheel angle; Kunos: -1.0 to 1.0, library README: 0.0 to 1.0 |
+| `gear` | vehicle | physics.gear | raw ACC gear index | unstated | - | Current gear in ACC's raw encoding, not the displayed gear (AC convention 0=R, 1=N, 2=1st is unverified for ACC) |
+| `rpm` | vehicle | physics.rpm | rpm | kunos | 0 to 30000 | Engine revolutions per minute |
+| `speed_kmh` | vehicle | physics.speedKmh | km/h | kunos | 0 to 500 | Car speed |
+| `water_temp` | vehicle | physics.waterTemp | degC (expected) | unstated | -60 to 250 | Water temperature |
+| `turbo_boost` | vehicle | physics.turboBoost | raw | unstated | - | Car turbo level |
+| `is_engine_running` | vehicle | physics.isEngineRunning | - | kunos | - | Engine running |
+| `pit_limiter_on` | vehicle | physics.pitLimiterOn | - | kunos | - | Pit limiter on |
+| `is_ai_controlled` | vehicle | physics.isAIControlled | - | kunos | - | Car is controlled by the AI |
+| `fuel_remaining` | vehicle | physics.fuel | kg (Kunos) / litres (library README) | conflict | 0 to 250 | Fuel remaining; Kunos says kg, library README says litres - check against the in-game fuel display |
+| `fuel_per_lap_l` | vehicle | graphics.fuelXLap | litres/lap | kunos | 0 to 50 | Average fuel consumed per lap |
+| `fuel_estimated_laps` | vehicle | graphics.fuelEstimatedLaps | laps | kunos | 0 to 10000 | Laps possible with current fuel |
+| `used_fuel` | vehicle | graphics.usedFuel | litres (expected) | unstated | 0 to 10000 | Fuel used since last refuelling |
+| `max_fuel` | vehicle | static.maxFuel | litres (expected) | unstated | 0 to 250 | Maximum fuel tank capacity |
+| `velocity` | dynamics | physics.velocity | m/s (expected) | unstated | - | Velocity [x, y, z], global (world) coordinates; axis orientation not stated by Kunos |
+| `local_velocity` | dynamics | physics.localVelocity | m/s (expected) | unstated | - | Velocity [x, y, z], car coordinates; axis orientation not stated by Kunos |
+| `acceleration` | dynamics | physics.accG | G (expected) | unstated | - | Acceleration [x, y, z], global (world) coordinates; axis orientation not stated by Kunos |
+| `angular_velocity` | dynamics | physics.localAngularVel | rad/s (expected) | unstated | - | Angular velocity [x, y, z], car coordinates; axis orientation not stated by Kunos |
+| `heading` | dynamics | physics.heading | rad (expected) | unstated | - | Car yaw orientation |
+| `pitch` | dynamics | physics.pitch | rad (expected) | unstated | - | Car pitch orientation |
+| `roll` | dynamics | physics.roll | rad (expected) | unstated | - | Car roll orientation |
+| `wheel_slip` | dynamics | physics.wheelSlip | dimensionless (expected) | unstated | - | Tyre slip per wheel |
+| `slip_ratio` | dynamics | physics.slipRatio | "radians" per Kunos (dimensionless expected) | conflict | - | Tyre slip ratio; Kunos labels it 'in radians', which is unusual for a ratio |
+| `slip_angle` | dynamics | physics.slipAngle | rad (expected) | unstated | - | Tyre slip angle |
+| `wheel_pressure` | tyres | physics.wheelPressure | psi (expected) | unstated | 0 to 100 | Tyre pressure |
+| `tyre_core_temperature` | tyres | physics.TyreCoreTemp | degC (expected) | unstated | -60 to 400 | Tyre rubber core temperature |
+| `wheel_angular_speed` | tyres | physics.wheelAngularSpeed | rad/s | kunos | - | Wheel angular speed |
+| `suspension_travel` | tyres | physics.suspensionTravel | m (expected) | unstated | -1 to 1 | Suspension travel |
+| `tyre_contact_point` | tyres | physics.tyreContactPoint | m (expected) | unstated | - | Tyre contact point [x, y, z] per wheel, global (world) coordinates; axis orientation not stated by Kunos |
+| `tyre_contact_normal` | tyres | physics.tyreContactNormal | unit vector (expected) | unstated | - | Tyre contact normal [x, y, z] per wheel, global (world) coordinates; axis orientation not stated by Kunos |
+| `tyre_contact_heading` | tyres | physics.tyreContactHeading | unit vector (expected) | unstated | - | Tyre contact heading [x, y, z] per wheel, global (world) coordinates; axis orientation not stated by Kunos |
+| `brake_pressure` | brakes | physics.brakePressure | raw (car-specific dash coefficient, Kunos appendix) | kunos | - | Brake pressure |
+| `brake_temperature` | brakes | physics.brakeTemp | degC (expected) | unstated | -60 to 2000 | Brake disc temperature |
+| `brake_bias` | brakes | physics.brakeBias | raw (Kunos appendix 4) | kunos | - | Front brake bias |
+| `pad_life` | brakes | physics.padLife | mm (library README: starts at 29 mm) | library | - | Brake pad wear |
+| `disc_life` | brakes | physics.discLife | mm (library README: starts at 32 mm) | library | - | Brake disc wear |
+| `abs_activity` | brakes | physics.abs | raw | unstated | - | ABS in action (raw level, not a setting) |
+| `tc_activity` | brakes | physics.tc | raw | unstated | - | Traction control in action (raw level, not a setting) |
+| `car_damage` | car | physics.carDamage | raw | unstated | - | Car damage [front, rear, left, right, center]; library notes 'center' is the sum of all |
+| `suspension_damage` | car | physics.suspensionDamage | raw | unstated | - | Suspension damage level |
+| `air_temp` | car | physics.airTemp | degC (expected) | unstated | -60 to 100 | Air temperature |
+| `road_temp` | car | physics.roadTemp | degC (expected) | unstated | -60 to 100 | Road temperature |
+| `status` | session | graphics.status | - | kunos | - | ACC_STATUS (OFF/REPLAY/LIVE/PAUSE) |
+| `session_type` | session | graphics.session | - | kunos | - | ACC_SESSION_TYPE |
+| `completed_laps` | session | graphics.completedLaps | laps | kunos | 0 to 10000 | Completed laps |
+| `position` | session | graphics.position | - | kunos | 0 to 1000 | Current player position |
+| `current_lap_time_ms` | session | graphics.iCurrentTime | ms | kunos | - | Current lap time |
+| `last_lap_time_ms` | session | graphics.iLastTime | ms | kunos | - | Last lap time |
+| `best_lap_time_ms` | session | graphics.iBestTime | ms | kunos | - | Best lap time |
+| `current_sector_index` | session | graphics.currentSectorIndex | - | kunos | - | Current track sector |
+| `is_in_pit` | session | graphics.isInPit | - | kunos | - | Car is pitting |
+| `is_in_pit_lane` | session | graphics.isInPitLane | - | kunos | - | Car is in pit lane |
+| `tyre_compound` | tyres | graphics.tyreCompound | - | kunos | - | Tyre compound used |
+| `current_tyre_set` | tyres | graphics.currentTyreSet | - | kunos | - | Tyre set currently in use |
+| `track_grip_status` | session | graphics.trackGripStatus | - | kunos | - | ACC_TRACK_GRIP_STATUS |
+| `rain_intensity` | session | graphics.rainIntensity | - | kunos | - | ACC_RAIN_INTENSITY |
+| `flag` | session | graphics.flag | - | kunos | - | ACC_FLAG_TYPE |
+| `session_time_left` | session | graphics.sessionTimeLeft | ms (expected) | unstated | - | Session time left |
+| `car_model` | session | static.carModel | - | kunos | - | Player car model (Kunos id) |
+| `track` | session | static.track | - | kunos | - | Track name |
+| `max_rpm` | vehicle | static.maxRpm | rpm | kunos | 0 to 30000 | Maximum rpm |
+| `sm_version` | session | static.smVersion | - | kunos | - | Shared memory version |
+| `ac_version` | session | static.acVersion | - | kunos | - | ACC version |

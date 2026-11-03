@@ -92,6 +92,9 @@ class MacReceiverConfig(_Cfg):
 class HealthConfig(_Cfg):
     stale_after_seconds: float = Field(default=3.0, gt=0)
     disconnect_after_seconds: float = Field(default=10.0, gt=0)
+    # Overall health needs fresh physics once any physics message has arrived in this
+    # run; with require_physics it needs physics from the start (bridge run with --physics).
+    require_physics: bool = False
 
     @model_validator(mode="after")
     def _order(self) -> "HealthConfig":
@@ -124,15 +127,16 @@ class PhysicsConfig(_Cfg):
     forward_hz: float = Field(default=5.0, gt=0, le=60)
     status_interval_s: float = Field(default=1.0, gt=0, le=60)
     reader_stale_after_s: float = Field(default=2.0, gt=0, le=60)
-    channels: Optional[list[str]] = None   # None = every defined channel
+    channels: Optional[list[str]] = None   # None = every defined channel; schema 1.0 names are renamed
 
     @field_validator("channels")
     @classmethod
     def _known(cls, v: Optional[list[str]]) -> Optional[list[str]]:
         if v is None:
             return v
-        from racesim.integrations.acc.physics_channels import BY_NAME
+        from racesim.integrations.acc.physics_channels import BY_NAME, LEGACY_NAMES
 
+        v = [LEGACY_NAMES.get(c, c) for c in v]
         bad = [c for c in v if c not in BY_NAME]
         if bad:
             raise ValueError(f"unknown physics channel(s): {bad}")
