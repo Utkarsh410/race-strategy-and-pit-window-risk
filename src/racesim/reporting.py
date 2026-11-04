@@ -18,6 +18,7 @@ import pandas as pd
 
 from racesim import __version__
 from racesim.config import setup_to_dict
+from racesim.formatting import format_lap_time
 from racesim.plotting import (
     plot_convergence,
     plot_cumulative_distribution,
@@ -149,7 +150,7 @@ def generate_strategy_report(bundle, path: Optional[str | Path] = None, *, title
     # 1. Race configuration
     parts.append("<h2>1. Race configuration</h2>")
     parts.append(_kv({"Race": race.race_name, "Circuit": race.circuit_name, "Total laps": race.total_laps,
-                      "Baseline lap time": f"{race.baseline_lap_time_s:.3f} s", "Championship rules": setup.regulations.championship_name,
+                      "Baseline lap time": format_lap_time(race.baseline_lap_time_s), "Championship rules": setup.regulations.championship_name,
                       "Simulation seed": race.simulation_seed,
                       "Monte Carlo runs": bundle.monte_carlo.n_sims if bundle.monte_carlo else "not run"}))
     # 2. Assumptions
@@ -165,7 +166,7 @@ def generate_strategy_report(bundle, path: Optional[str | Path] = None, *, title
         "Refuelling": "permitted" if setup.refuelling_allowed else "not permitted",
         "Weather": f"{setup.weather.scenario} ({setup.weather.calibration_status})",
     }))
-    comp_rows = pd.DataFrame([{"compound": c.compound_name, "type": c.compound_type, "reference_s": c.reference_lap_time_s,
+    comp_rows = pd.DataFrame([{"compound": c.compound_name, "type": c.compound_type, "reference_lap": format_lap_time(c.reference_lap_time_s),
                                "linear_s_per_lap": c.linear_degradation_s_per_lap, "nonlinear_coef": c.nonlinear_degradation_coefficient,
                                "threshold_laps": c.nonlinear_degradation_threshold_laps, "warmup_s": c.warmup_penalty_s,
                                "max_age_laps": c.maximum_recommended_age_laps, "source": c.parameter_source}
@@ -346,23 +347,33 @@ def export_race_summary(result: SimulationResult | Iterable[SimulationResult], p
 
 def generate_live_session_report(snapshots: Iterable[dict], path: Optional[str | Path] = None) -> str:
     """Post-session summary of ACC telemetry analysis, one section per session (from ``LiveAnalysis.snapshot``)."""
+    from racesim.integrations.acc.live_analysis import OVERVIEW_LAP_TIME_ROWS
+
+    def with_lap_times(rows: list, column: str) -> pd.DataFrame:
+        df = pd.DataFrame(rows)
+        if column in df.columns:
+            df.insert(df.columns.get_loc(column), column.removesuffix("_s"), df.pop(column).map(format_lap_time))
+        return df
     parts = []
     for snap in snapshots:
         if not snap.get("available"):
             continue
         pace = snap["pace"]
-        stats = [{"statistic": name, "value_s": pace[name]["value"], "valid_laps": pace[name]["n"]} for name in ("best", "mean", "median", "std")]
-        stats += [{"statistic": f"rolling {w}", "value_s": r["value"], "valid_laps": r["n"]} for w, r in pace["rolling"].items()]
+        stats = [{"statistic": name, "value": format_lap_time(pace[name]["value"]), "valid_laps": pace[name]["n"]} for name in ("best", "mean", "median")]
+        std = pace["std"]["value"]
+        stats.append({"statistic": "std", "value": None if std is None else f"{std:.3f} s", "valid_laps": pace["std"]["n"]})
+        stats += [{"statistic": f"rolling {w}", "value": format_lap_time(r["value"]), "valid_laps": r["n"]} for w, r in pace["rolling"].items()]
         source = "MOCK data - not ACC" if snap.get("mock") else "Recorded ACC telemetry"
         parts.append(
             f"<h2>Session {_esc(snap['session_key'])}</h2><p class='banner'>{_esc(source)}. Lap times are measured; classifications and "
             "statistics are derived from telemetry.</p>"
-            + _kv({r["channel"]: "UNAVAILABLE" if r["value"] is None else f"{r['value']} {r['unit']}".strip() for r in snap["overview"]})
+            + _kv({r["channel"]: "UNAVAILABLE" if r["value"] is None else format_lap_time(r["value"]) if r["channel"] in OVERVIEW_LAP_TIME_ROWS
+                   else f"{r['value']} {r['unit']}".strip() for r in snap["overview"]})
             + "<h3>Pace (clean-lap candidates only)</h3>" + _table(pd.DataFrame(stats))
             + f"<p class='muted'>{_esc(pace['trend_note'])}</p>"
-            + "<h3>Laps</h3>" + _table(pd.DataFrame(snap["laps"]), max_rows=500)
+            + "<h3>Laps</h3>" + _table(with_lap_times(snap["laps"], "lap_time_s"), max_rows=500)
             + "<h3>Stints</h3>" + _table(pd.DataFrame(snap["stints"]))
-            + "<h3>Stint pace</h3>" + _table(pd.DataFrame(pace["stints"]))
+            + "<h3>Stint pace</h3>" + _table(with_lap_times(pace["stints"], "median_s"))
             + "<h3>Pit transitions</h3>" + _table(pd.DataFrame(snap["transitions"]))
             + "<h3>Channels not supplied</h3>" + _table(pd.DataFrame(snap["missing_channels"]))
             + "<h3>Data-quality flags</h3>" + _kv(snap["flags"] or {"none": 0})

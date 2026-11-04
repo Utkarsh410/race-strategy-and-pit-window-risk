@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from racesim.formatting import format_lap_time, lap_time_ticks
+
 # Validated categorical order (fixed slots, never cycled).
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 NEUTRAL = "#8a8984"
@@ -40,6 +42,18 @@ def _layout(fig: go.Figure, title: str, x: str, y: str, *, height: int = 420, le
     fig.update_xaxes(gridcolor=GRID, zeroline=False, linecolor=GRID)
     fig.update_yaxes(gridcolor=GRID, zeroline=False, linecolor=GRID)
     return fig
+
+
+def _lap_time_axis(fig: go.Figure) -> go.Figure:
+    """Label the y axis in race format (m:ss) instead of raw seconds."""
+    ticks, text = lap_time_ticks([y for tr in fig.data if getattr(tr, "y", None) is not None for y in tr.y])
+    if ticks:
+        fig.update_yaxes(tickvals=ticks, ticktext=text)
+    return fig
+
+
+def _lap_labels(values) -> list:
+    return [format_lap_time(v) or "" for v in values]
 
 
 def empty_figure(title: str, message: str) -> go.Figure:
@@ -86,7 +100,8 @@ def plot_lap_time_progression(observed: Optional[pd.DataFrame] = None, predicted
             g = g.sort_values("lap")
             fig.add_trace(go.Scatter(x=g["lap"], y=g["lap_time_s"], mode="markers", name=f"{name} (observed)",
                                      marker={"size": 8, "color": color_for(k), "line": {"width": 1, "color": SURFACE}},
-                                     hovertemplate="Lap %{x}<br>%{y:.3f} s<extra>%{fullData.name}</extra>"))
+                                     customdata=_lap_labels(g["lap_time_s"]),
+                                     hovertemplate="Lap %{x}<br>%{customdata}<extra>%{fullData.name}</extra>"))
             k += 1
         if "track_status" in observed.columns:
             first = observed.drop_duplicates("lap").sort_values("lap")
@@ -95,13 +110,13 @@ def plot_lap_time_progression(observed: Optional[pd.DataFrame] = None, predicted
         groups = predicted.groupby("strategy") if "strategy" in predicted.columns else [("Predicted", predicted)]
         for name, g in groups:
             fig.add_trace(go.Scatter(x=g["lap"], y=g["lap_time_s"], mode="lines", name=f"{name} (model)",
-                                     line={"width": 2, "color": color_for(k)},
-                                     hovertemplate="Lap %{x}<br>%{y:.3f} s<extra>%{fullData.name}</extra>"))
+                                     line={"width": 2, "color": color_for(k)}, customdata=_lap_labels(g["lap_time_s"]),
+                                     hovertemplate="Lap %{x}<br>%{customdata}<extra>%{fullData.name}</extra>"))
             k += 1
         if observed is None and "track_status" in predicted.columns:
             first = predicted.drop_duplicates("lap")
             _shade_status(fig, first["lap"].tolist(), first["track_status"].tolist())
-    return _layout(fig, title, "Lap", "Lap time (s)")
+    return _lap_time_axis(_layout(fig, title, "Lap", "Lap time (m:ss)"))
 
 
 def plot_tyre_degradation(model_curves: Optional[pd.DataFrame] = None, observed: Optional[pd.DataFrame] = None,
@@ -394,8 +409,8 @@ def plot_replanning_timeline(laps: pd.DataFrame, decisions: pd.DataFrame, *, sta
     _shade_status(fig, laps["lap"].tolist(), laps["track_status"].tolist())
     fig.add_trace(go.Scatter(x=laps["lap"], y=laps["lap_time_s"], mode="lines+markers", name="Lap time (simulated race)",
                              line={"width": 2, "color": SERIES[0]}, marker={"size": 6},
-                             customdata=laps[["tyre_compound", "tyre_age_laps"]],
-                             hovertemplate="Lap %{x}<br>%{y:.2f} s<br>%{customdata[0]} age %{customdata[1]}<extra></extra>"))
+                             customdata=laps[["tyre_compound", "tyre_age_laps"]].assign(lap_time=_lap_labels(laps["lap_time_s"])),
+                             hovertemplate="Lap %{x}<br>%{customdata[2]}<br>%{customdata[0]} age %{customdata[1]}<extra></extra>"))
     pits = laps[laps["pit_time_s"] > 0]
     fig.add_trace(go.Scatter(x=pits["lap"], y=pits["lap_time_s"], mode="markers", name="Pit stop (in-lap)",
                              marker={"size": 14, "symbol": "triangle-down", "color": SERIES[1], "line": {"width": 2, "color": SURFACE}}))
@@ -406,4 +421,4 @@ def plot_replanning_timeline(laps: pd.DataFrame, decisions: pd.DataFrame, *, sta
                                  customdata=d[["triggers"]],
                                  marker={"size": 10, "symbol": "diamond", "color": SERIES[2], "line": {"width": 2, "color": SURFACE}},
                                  hovertemplate="Lap %{x}: %{text}<br>%{customdata[0]}<extra></extra>"))
-    return _layout(fig, title, "Lap", "Lap time (s)")
+    return _lap_time_axis(_layout(fig, title, "Lap", "Lap time (m:ss)"))

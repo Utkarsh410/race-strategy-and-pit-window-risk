@@ -19,7 +19,7 @@ def test_empty_inputs_give_placeholder(fig):
 
 def test_charts_have_titles_and_units(lap_df):
     f = P.plot_lap_time_progression(lap_df)
-    assert "(s)" in f.layout.yaxis.title.text and f.layout.xaxis.title.text == "Lap"
+    assert "(m:ss)" in f.layout.yaxis.title.text and f.layout.xaxis.title.text == "Lap"
     m = P.plot_monte_carlo_distribution({"a": np.random.default_rng(0).normal(100, 1, 200)}, {"a": "A"})
     assert "(s)" in m.layout.xaxis.title.text and "n = 200" in m.layout.title.text
     assert "observed" in f.data[0].name

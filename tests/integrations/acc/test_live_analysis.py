@@ -5,6 +5,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from live_fixtures import Script, drive, feed
 
@@ -260,3 +261,13 @@ def test_receiver_manager_starts_one_receiver_and_writes_exports(manager, tmp_pa
     manager.stop()
     assert not first.running and set(manager.exports) == {"laps", "stints", "summary"}
     assert all(p.exists() for p in manager.exports.values())
+
+
+def test_display_tables_show_lap_times_in_race_format():
+    _, an, now = _analysis()
+    snap = an.snapshot(now)
+    laps = data.with_lap_times(data.recent_laps_table(snap), ("lap_time_s",))
+    assert "lap_time_s" not in laps.columns and laps["lap_time"].str.match(r"^\d+:\d{2}\.\d{3}$").all()
+    pace = data.pace_display(data.pace_table(snap)).set_index("statistic")["value"]
+    assert pace["Rolling pace, last 3 valid laps"] == "1:42.000" and pace["Standard deviation"].endswith(" s")
+    assert pd.isna(pace["Rolling pace, last 5 valid laps"])

@@ -23,7 +23,10 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 
+from dashboard.common import show
+from dashboard.telemetry_visuals import driver_dash, tyre_corners
 from racesim.config import PROJECT_ROOT
+from racesim.formatting import format_lap_time
 from racesim.integrations.acc.auth import load_secret
 from racesim.integrations.acc.config import load_acc_config
 from racesim.integrations.acc.health import HealthState
@@ -34,6 +37,7 @@ from racesim.integrations.acc.physics_channels import (BRAKE_WHEEL_CHANNELS, LIV
                                                        STALE as PH_STALE, TYRE_WHEEL_CHANNELS, UNAVAILABLE, physics_table,
                                                        quality_summary, wheel_rows)
 from racesim.integrations.acc.state_builder import MOCK, STALE, channel_table
+from racesim.plotting import plot_lap_time_progression
 
 CONFIG_PATH = PROJECT_ROOT / "config" / "acc_bridge.yaml"
 STATE_ICON = {HealthState.CONNECTED: ":material/check_circle:", HealthState.WAITING_FOR_DATA: ":material/hourglass_empty:",
@@ -176,7 +180,12 @@ def _physics_panel(rx, h) -> None:
     if stale and not mock:
         st.warning(f"Physics is {h.physics.value}: the newest sample was taken {age:.1f} s ago. Values are not current.")
     c = payload.get("channels", {})
-    tabs = st.tabs(["Driver inputs", "Vehicle", "Dynamics", "Tyres", "Brakes", "Data quality", "All channels"])
+    dash, *tabs = st.tabs(["Dash", "Driver inputs", "Vehicle", "Dynamics", "Tyres", "Brakes", "Data quality", "All channels"])
+    with dash:
+        show(driver_dash(c, label), key="physics_dash")
+        show(tyre_corners(c, label), key="physics_corners")
+        st.caption(f"{label}. Grey means UNAVAILABLE, never zero. Colour bands are display aids, not validated targets for this car; "
+                   "gear is ACC's raw index and the fuel unit (kg or L) is unverified (see the Vehicle tab).")
     with tabs[0]:
         k = st.columns(4)
         for col, (title, key) in zip(k, [("Throttle (0-1)", "throttle"), ("Brake (0-1)", "brake"),
@@ -306,8 +315,8 @@ def render_live(mgr: ReceiverManager, refresh_s: float) -> None:
         k = st.columns(6)
         k[0].metric("Position", _fmt(v.get("position")))
         k[1].metric("Current lap (derived)", _fmt(v.get("current_lap")))
-        k[2].metric("Last lap", _fmt(v.get("last_lap_time_s"), "s"))
-        k[3].metric("Best lap", _fmt(v.get("best_lap_time_s"), "s"))
+        k[2].metric("Last lap", _fmt(format_lap_time(v.get("last_lap_time_s"))))
+        k[3].metric("Best lap", _fmt(format_lap_time(v.get("best_lap_time_s"))))
         k[4].metric("Sector (derived)", _fmt(v.get("current_sector")))
         k[5].metric("Car location", _fmt(v.get("car_location")))
         rows = channel_table(payload, mock=mock, stale=stale)
@@ -347,7 +356,8 @@ def render_replay() -> None:
         tel = df[df["message_type"] == "telemetry"]
         laps = tel.dropna(subset=["last_lap_time_s"]).drop_duplicates(["laps_completed"])
         if not laps.empty:
-            st.line_chart(laps.set_index("laps_completed")["last_lap_time_s"], x_label="Laps completed", y_label="Last lap time (s)")
+            chart = laps.rename(columns={"laps_completed": "lap", "last_lap_time_s": "lap_time_s"})[["lap", "lap_time_s"]]
+            show(plot_lap_time_progression(chart, title="Last lap time by laps completed (REPLAY)"))
         st.dataframe(df, hide_index=True)
 
 

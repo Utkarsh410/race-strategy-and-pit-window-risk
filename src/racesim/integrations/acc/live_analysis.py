@@ -28,6 +28,7 @@ from racesim.integrations.acc.session_logger import SessionLogger, read_session_
 logger = logging.getLogger(__name__)
 
 MAX_SESSIONS_KEPT = 20
+OVERVIEW_LAP_TIME_ROWS = ("Last lap", "Best lap (session)")  # shown as m:ss.mmm; stored in seconds
 LAP_CSV_COLUMNS = ["session_key", "lap_number", "lap_time_s", "classification", "sector_1_s", "sector_2_s", "sector_3_s", "sector_source",
                    "position", "in_pit", "stint_id", "stint_lap", "tyre_compound", "tyre_age_laps", "fuel_start_kg", "fuel_end_kg",
                    "session_time_end_s", "flags"]

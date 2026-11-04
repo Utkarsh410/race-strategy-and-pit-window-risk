@@ -16,9 +16,11 @@ import streamlit as st
 
 from dashboard import acc_performance_data as data
 from dashboard.acc_live_view import _config, _receiver_controls, receiver_manager
+from dashboard.common import show
 from racesim.config import PROJECT_ROOT, load_setup
 from racesim.integrations.acc.live_analysis import LiveAnalysis, replay_session_log
 from racesim.integrations.acc.live_strategy import BLOCKED, ELIGIBLE, LiveAssumptions, build_inputs, run_live_strategy
+from racesim.plotting import plot_lap_time_progression
 
 STRATEGY_KEY = "acc_strategy_result"
 
@@ -40,7 +42,7 @@ def _session_panel(snap: dict) -> None:
 
 def _lap_panel(snap: dict) -> None:
     st.markdown("**Pace statistics** - clean-lap candidates only, each with its sample size")
-    st.dataframe(data.pace_table(snap), hide_index=True, width="stretch")
+    st.dataframe(data.pace_display(data.pace_table(snap)), hide_index=True, width="stretch")
     counts = snap["pace"]["classification_counts"]
     if counts:
         st.caption("Lap classifications: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
@@ -49,10 +51,10 @@ def _lap_panel(snap: dict) -> None:
     if laps.empty:
         st.info("No completed laps yet. ACC does not count the out-lap, so the first timed lap is the first to appear.")
     else:
-        st.dataframe(laps, hide_index=True, width="stretch")
-        chart = laps.dropna(subset=["lap_time_s"]).set_index("lap_number")["lap_time_s"].sort_index()
+        st.dataframe(data.with_lap_times(laps, ("lap_time_s",)), hide_index=True, width="stretch")
+        chart = laps.dropna(subset=["lap_time_s"]).rename(columns={"lap_number": "lap"})[["lap", "lap_time_s"]]
         if len(chart) > 1:
-            st.line_chart(chart, x_label="Lap", y_label="Lap time (s), all timed laps")
+            show(plot_lap_time_progression(chart, title="Lap times, all timed laps"))
     st.markdown("**Sector comparison**")
     sectors = data.sector_table(snap)
     if sectors["n"].sum() == 0:
@@ -66,7 +68,7 @@ def _stint_panel(snap: dict) -> None:
     if stints.empty:
         st.info("No stint yet: waiting for a valid car location.")
     else:
-        st.dataframe(stints, hide_index=True, width="stretch")
+        st.dataframe(data.with_lap_times(stints, ("median_s",)), hide_index=True, width="stretch")
     st.caption(snap["pace"]["trend_note"])
     if snap["transitions"]:
         st.markdown("**Pit transitions** (DERIVED FROM TELEMETRY; a pit visit does not prove a tyre change)")

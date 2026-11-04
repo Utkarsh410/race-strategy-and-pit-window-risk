@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from dashboard.common import DashboardContext, cached_optimisation, cached_pit_window, ss
+from racesim.formatting import format_lap_time
 
 
 def _controls(ctx: DashboardContext) -> None:
@@ -57,7 +58,7 @@ def render(ctx: DashboardContext) -> None:
     st.subheader("Headline")
     k = st.columns(4)
     k[0].metric("Total laps", r.total_laps)
-    k[1].metric("Baseline lap time", f"{r.baseline_lap_time_s:.3f} s")
+    k[1].metric("Baseline lap time", format_lap_time(r.baseline_lap_time_s))
     k[2].metric("Current lap", ctx.snapshot.current_lap)
     k[3].metric("Current tyre age", f"{ctx.snapshot.tyre_age_laps} laps" if ctx.snapshot.current_lap else "new (pre-race)")
     k = st.columns(4)

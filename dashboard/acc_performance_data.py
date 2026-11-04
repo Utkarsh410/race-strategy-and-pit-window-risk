@@ -6,6 +6,8 @@ from typing import Optional
 
 import pandas as pd
 
+from racesim.formatting import format_lap_time
+from racesim.integrations.acc.live_analysis import OVERVIEW_LAP_TIME_ROWS
 from racesim.integrations.acc.race_state import Provenance
 
 UNAVAILABLE = Provenance.UNAVAILABLE.value
@@ -23,8 +25,31 @@ def data_label(snap: dict) -> str:
 
 
 def overview_table(snap: dict) -> pd.DataFrame:
-    rows = [{**r, "value": "" if r["value"] is None else str(r["value"])} for r in snap.get("overview", [])]
+    rows = []
+    for r in snap.get("overview", []):
+        if r["value"] is not None and r["channel"] in OVERVIEW_LAP_TIME_ROWS:
+            rows.append({**r, "value": format_lap_time(r["value"]), "unit": "m:ss.mmm"})
+        else:
+            rows.append({**r, "value": "" if r["value"] is None else str(r["value"])})
     return pd.DataFrame(rows, columns=["channel", "value", "unit", "label", "source"])
+
+
+def with_lap_times(df: pd.DataFrame, columns: tuple[str, ...]) -> pd.DataFrame:
+    """Display copy with each seconds column shown as m:ss.mmm and the ``_s`` suffix dropped (``lap_time_s`` -> ``lap_time``)."""
+    out = df.copy()
+    for col in columns:
+        if col in out.columns:
+            out.insert(out.columns.get_loc(col), col.removesuffix("_s"), out.pop(col).map(format_lap_time))
+    return out
+
+
+def pace_display(table: pd.DataFrame) -> pd.DataFrame:
+    """:func:`pace_table` for display: lap-time statistics in m:ss.mmm, the standard deviation in seconds."""
+    out = table.copy()
+    std = out["statistic"] == "Standard deviation"
+    value = out.pop("value_s")
+    out.insert(1, "value", [(None if pd.isna(v) else f"{v:.3f} s") if s else format_lap_time(v) for v, s in zip(value, std)])
+    return out
 
 
 def recent_laps_table(snap: dict, n: int = 15) -> pd.DataFrame:
