@@ -62,3 +62,38 @@ def test_apply_calibration_updates_model():
     after = at.session_state["ov_lin_HARD"]
     assert after != before
     assert not at.error, [e.value for e in at.error]
+
+
+def _render_with_lap_only_upload():
+    """Every section with lap data like a MoTeC upload: only lap and lap_time_s."""
+    import logging
+
+    import pandas as pd
+    import streamlit as st
+
+    from dashboard import (overview, pit_window_view, replanning_view, risk_analysis, rival_analysis, strategy_planner,
+                           telemetry_analysis, uncertainty_view)
+    from dashboard.common import make_context
+    from racesim.data_ingestion import load_race_dataframe
+    from racesim.data_validation import clean_lap_times
+
+    ctx = make_context()
+    laps = pd.DataFrame({"lap": range(1, 21), "lap_time_s": [110.0 + 0.05 * i for i in range(20)]})
+    ctx.data = load_race_dataframe(laps, source="Uploaded MoTeC file: test.csv")
+    ctx.data_label = ctx.data.source
+    ctx.cleaning = clean_lap_times(ctx.data.data)
+    failed = []
+    for section in (overview, strategy_planner, pit_window_view, risk_analysis, rival_analysis, telemetry_analysis,
+                    replanning_view, uncertainty_view):
+        try:
+            section.render(ctx)
+        except Exception as exc:  # collect every failure, not just the first
+            logging.getLogger("test").exception("section failed")
+            failed.append(f"{section.__name__}: {type(exc).__name__}: {exc}")
+    st.session_state["failed_sections"] = failed
+
+
+def test_sections_render_with_lap_only_upload():
+    at = AppTest.from_function(_render_with_lap_only_upload, default_timeout=600).run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert at.session_state["failed_sections"] == []

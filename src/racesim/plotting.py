@@ -129,12 +129,16 @@ def plot_tyre_degradation(model_curves: Optional[pd.DataFrame] = None, observed:
     """
     if (model_curves is None or model_curves.empty) and (observed is None or observed.empty):
         return empty_figure(title, "No tyre data or model curves available.")
+    # observed laps can only be drawn with a compound and a tyre age (a MoTeC upload has neither)
+    if observed is not None and not {"tyre_age_laps", "tyre_compound", "lap_time_s"} <= set(observed.columns):
+        observed = None
+    if (model_curves is None or model_curves.empty) and (observed is None or observed.empty):
+        return empty_figure(title, "No tyre data or model curves available.")
     fig = go.Figure()
     order = ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"]
     comps = []
-    for df in (model_curves, observed):
+    for df, col in ((model_curves, "compound"), (observed, "tyre_compound")):
         if df is not None and not df.empty:
-            col = "compound" if "compound" in df.columns else "tyre_compound"
             comps += [c for c in df[col].astype(str).unique() if c not in comps]
     comps.sort(key=lambda c: order.index(c) if c in order else 99)
     cmap = {c: color_for(i) for i, c in enumerate(comps)}
@@ -143,7 +147,7 @@ def plot_tyre_degradation(model_curves: Optional[pd.DataFrame] = None, observed:
             fig.add_trace(go.Scatter(x=g["tyre_age_laps"], y=g["degradation_s"], mode="lines", name=f"{c} (model)",
                                      line={"width": 2, "color": cmap[c]},
                                      hovertemplate="Age %{x} laps<br>+%{y:.3f} s<extra>%{fullData.name}</extra>"))
-    if observed is not None and not observed.empty and {"tyre_age_laps", "tyre_compound", "lap_time_s"} <= set(observed.columns):
+    if observed is not None and not observed.empty:
         from racesim.data_validation import assign_stint_ids, representative_lap_mask
 
         obs = assign_stint_ids(observed[representative_lap_mask(observed)])
