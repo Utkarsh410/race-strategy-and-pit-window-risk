@@ -25,3 +25,7 @@ chartCategoricalColors = ["#B9A7E8", "#E7DDCF", "#2a78d6", "#eb6834", "#1baf7a",
 [theme.sidebar]
 backgroundColor = "#111114"           # --color-carbon-900
 secondaryBackgroundColor = "#17171B"
+
+[server]
+# MoTeC CSV exports of a long outing reach ~300 MB; Streamlit's default limit is 200 MB (the label rounds, so use whole GB).
+maxUploadSize = 1024

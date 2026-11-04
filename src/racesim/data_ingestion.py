@@ -18,20 +18,30 @@ air_temp_c         degrees Celsius
 track_temp_c       degrees Celsius
 =================  =====================================================
 
-Units are never inferred: a column such as ``lap_time`` or ``lap_time_ms``
-is rejected with a message asking for an explicit ``lap_time_s`` column.
+Units are never inferred: a numeric column such as ``lap_time`` or
+``lap_time_ms`` is rejected with a message asking for an explicit
+``lap_time_s`` column. Two things are accepted because their unit is not in
+doubt: lap times written in race format (``1:50.485``, ``1:02:03.456``) in
+any lap-time or sector column, and ``lap_number`` for ``lap``. Headers are
+matched ignoring case, spaces and hyphens (``Lap Time`` -> ``lap_time``).
+
+:func:`read_lap_csv` reads an uploaded file: comma, semicolon or tab
+separated, with or without a byte-order mark, or a MoTeC i2 CSV export, whose
+lap times come from its beacon markers (see :mod:`racesim.integrations.motec`).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional, Union
+from typing import Any, BinaryIO, Iterable, Optional, Union
 
 import pandas as pd
 
 from racesim.data_validation import MANDATORY_COLUMNS, ValidationReport, validate_race_data
+from racesim.formatting import parse_lap_time
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +57,8 @@ AMBIGUOUS_UNIT_COLUMNS = {
     "fuel": "fuel_kg", "fuel_l": "fuel_kg", "tyre_age": "tyre_age_laps", "air_temp": "air_temp_c",
     "track_temp": "track_temp_c", "traffic_loss": "traffic_loss_s",
 }
+COLUMN_ALIASES = {"lap_number": "lap", "lap_no": "lap", "lap_num": "lap"}  # same meaning and unit
+RACE_FORMAT_COLUMNS = ("lap_time_s", "sector1_s", "sector2_s", "sector3_s")
 _TRUE = {"true", "1", "yes", "y", "t"}
 _FALSE = {"false", "0", "no", "n", "f", "", "nan", "none"}
 
@@ -64,6 +76,32 @@ class IngestionResult:
     report: ValidationReport
     source: str
     coercion_warnings: list[str]
+
+
+def _header_key(name: str) -> str:
+    return re.sub(r"[\s\-]+", "_", str(name).strip().lower())
+
+
+def _race_format_seconds(series: pd.Series, *, only_race_format: bool = False) -> Optional[pd.Series]:
+    """Convert m:ss(.mmm) / h:mm:ss(.mmm) text to seconds; None if the column holds no such text.
+
+    Plain numbers pass through; text that is neither stays as it is, so the
+    usual coercion sets it to missing and flags it. With ``only_race_format``
+    (a column whose name leaves the unit open) any plain number means None.
+    """
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return None
+    text = series.astype("string").str.strip()
+    timed = text.str.contains(":", regex=False).fillna(False)
+    if not timed.any():
+        return None
+    if only_race_format and not (timed | text.isna() | (text == "")).all():
+        return None
+    values = []
+    for v, is_timed in zip(series.tolist(), timed.tolist()):
+        seconds = parse_lap_time(v) if is_timed else None
+        values.append(seconds if seconds is not None else v)
+    return pd.Series(values, index=series.index, dtype=object)
 
 
 def _parse_bool(series: pd.Series, name: str) -> tuple[pd.Series, list[str]]:
@@ -86,11 +124,34 @@ def load_race_dataframe(dataframe: pd.DataFrame, *, source: str = "dataframe", s
     """
     raw = dataframe.copy()
     df = dataframe.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    lower_map = {c: c.lower() for c in df.columns if c.lower() in OPTIONAL_COLUMNS and c != c.lower()}
-    df = df.rename(columns=lower_map)
-    ambiguous = {c: AMBIGUOUS_UNIT_COLUMNS[c.lower()] for c in df.columns
-                 if c.lower() in AMBIGUOUS_UNIT_COLUMNS and AMBIGUOUS_UNIT_COLUMNS[c.lower()] not in df.columns}
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    warnings: list[str] = []
+    rename: dict[str, str] = {}
+    for c in df.columns:
+        key = COLUMN_ALIASES.get(_header_key(c), _header_key(c))
+        known = key in OPTIONAL_COLUMNS or key in AMBIGUOUS_UNIT_COLUMNS
+        if known and key != c and key not in df.columns and key not in rename.values():
+            rename[c] = key
+            if _header_key(c) in COLUMN_ALIASES:
+                warnings.append(f"Column '{c}' used as '{key}'.")
+    df = df.rename(columns=rename)
+    # race-format text has an unambiguous unit, so e.g. a 'Lap Time' column of 1:50.485 values is accepted
+    for c in list(df.columns):
+        target = AMBIGUOUS_UNIT_COLUMNS.get(c)
+        if target in RACE_FORMAT_COLUMNS and target not in df.columns:
+            seconds = _race_format_seconds(df[c], only_race_format=True)
+            if seconds is not None:
+                df[target] = seconds
+                df = df.drop(columns=c)
+                warnings.append(f"Column '{c}' read as race-format times (m:ss.mmm) and converted to '{target}'.")
+    for col in RACE_FORMAT_COLUMNS:
+        if col in df.columns:
+            seconds = _race_format_seconds(df[col])
+            if seconds is not None:
+                df[col] = seconds
+                warnings.append(f"Column '{col}': race-format times (m:ss.mmm) converted to seconds.")
+    ambiguous = {c: AMBIGUOUS_UNIT_COLUMNS[c] for c in df.columns
+                 if c in AMBIGUOUS_UNIT_COLUMNS and AMBIGUOUS_UNIT_COLUMNS[c] not in df.columns}
     missing = [c for c in MANDATORY_COLUMNS if c not in df.columns]
     if missing and strict:
         hint = ""
@@ -100,7 +161,7 @@ def load_race_dataframe(dataframe: pd.DataFrame, *, source: str = "dataframe", s
                     + ". Units are not inferred automatically.")
         raise DataValidationError(f"Missing mandatory column(s) {missing}.{hint}")
 
-    warnings: list[str] = [f"Column '{k}' ignored: unit unknown (expected '{v}')." for k, v in ambiguous.items()]
+    warnings += [f"Column '{k}' ignored: unit unknown (expected '{v}')." for k, v in ambiguous.items()]
     for col in NUMERIC_COLUMNS:
         if col in df.columns:
             before = df[col].notna()
@@ -127,6 +188,29 @@ def load_race_dataframe(dataframe: pd.DataFrame, *, source: str = "dataframe", s
     for w in report.warnings:
         logger.warning("[%s] %s", source, w)
     return IngestionResult(raw=raw, data=df, report=report, source=source, coercion_warnings=warnings)
+
+
+def read_lap_csv(buffer: BinaryIO, name: str = "upload") -> tuple[pd.DataFrame, str, list[str]]:
+    """Read an uploaded lap file: ``(frame, data label, notes)``.
+
+    A MoTeC i2 CSV export is recognised from its first line and reduced to
+    lap times from its beacon markers; any other file is read as a lap-level
+    CSV with the separator detected (comma, semicolon or tab).
+    """
+    from racesim.integrations.motec import is_motec_csv, motec_laps
+
+    if is_motec_csv(buffer):
+        laps, header = motec_laps(buffer)
+        where = " / ".join(x for x in (header.venue, header.vehicle) if x)
+        return laps, f"Uploaded MoTeC file: {name}" + (f" ({where})" if where else ""), header.notes
+    sample = buffer.read(64 * 1024)
+    buffer.seek(0)
+    text = sample.decode("utf-8-sig", errors="replace") if isinstance(sample, bytes) else sample
+    first = text.splitlines()[0] if text else ""
+    sep = max((",", ";", "\t"), key=first.count)
+    df = pd.read_csv(buffer, sep=sep, encoding="utf-8-sig")
+    notes = [] if sep == "," else [f"Separator detected: {'tab' if sep == chr(9) else repr(sep)}."]
+    return df, f"Uploaded file: {name}", notes
 
 
 def load_race_csv(path: Union[str, Path], **kwargs: Any) -> IngestionResult:

@@ -480,8 +480,23 @@ Behaviour notes:
 ## CSV schema
 
 Only `lap` and `lap_time_s` are mandatory. Units are fixed by the column names and
-are **never inferred**. A column called `lap_time` or `lap_time_ms` is rejected
-with a message asking you to convert it and rename it to `lap_time_s`.
+are **never inferred**. A numeric column called `lap_time` or `lap_time_ms` is
+rejected with a message asking you to convert it and rename it to `lap_time_s`.
+
+Accepted because the unit is not in doubt:
+
+* lap times in race format (`1:50.485`, `1:02:03.456`) in `lap_time_s`, the sector
+  columns, or a `lap_time` / `Lap Time` column made up entirely of such values;
+* `lap_number` (as written by RaceSim's own ACC lap export) for `lap`;
+* headers in any case, with spaces or hyphens (`Lap Time` matches `lap_time`);
+* comma-, semicolon- or tab-separated files, with or without a byte-order mark.
+
+**MoTeC i2 CSV exports** (for example from ACC's MoTeC logger) can be uploaded
+directly. RaceSim reads only the header and takes lap times from the beacon
+markers. It leaves out the out-lap and the final partial lap, and lets the
+cleaning step flag laps that include a pit stop or garage time. These files
+carry no tyre, fuel or sector columns, so those analyses stay disabled. The
+dashboard accepts uploads up to 1 GB (`.streamlit/config.toml`).
 
 | Column | Type / unit | Notes |
 |---|---|---|
