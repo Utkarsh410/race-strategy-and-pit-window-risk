@@ -487,16 +487,30 @@ Accepted because the unit is not in doubt:
 
 * lap times in race format (`1:50.485`, `1:02:03.456`) in `lap_time_s`, the sector
   columns, or a `lap_time` / `Lap Time` column made up entirely of such values;
-* `lap_number` (as written by RaceSim's own ACC lap export) for `lap`;
+* `lap_number`, `sector_1_s`..`sector_3_s` and `fuel_start_kg` (as written by RaceSim's own ACC lap export) for
+  `lap`, `sector1_s`..`sector3_s` and `fuel_kg`;
 * headers in any case, with spaces or hyphens (`Lap Time` matches `lap_time`);
 * comma-, semicolon- or tab-separated files, with or without a byte-order mark.
 
-**MoTeC i2 CSV exports** (for example from ACC's MoTeC logger) can be uploaded
-directly. RaceSim reads only the header and takes lap times from the beacon
-markers. It leaves out the out-lap and the final partial lap, and lets the
-cleaning step flag laps that include a pit stop or garage time. These files
-carry no tyre, fuel or sector columns, so those analyses stay disabled. The
-dashboard accepts uploads up to 1 GB (`.streamlit/config.toml`).
+### Upload formats
+
+| Format | Extension | What RaceSim reads |
+|---|---|---|
+| Lap table | `.csv`, `.tsv`, `.txt` | the columns below; comma, semicolon or tab separated, with or without a byte-order mark |
+| Excel workbook | `.xlsx` | the first sheet, same columns (needs `openpyxl`: `.venv/bin/pip install openpyxl`) |
+| JSON / JSON Lines | `.json`, `.jsonl` | a list of lap objects, an object with a `laps` list, or one lap object per line |
+| Parquet | `.parquet` | same columns |
+| MoTeC i2 CSV export | `.csv` | lap times from the header's beacon markers; the 200 Hz samples are not parsed |
+| MoTeC log | `.ld` | lap times from the running lap-timer channel (`TIME` in ACC logs), corrected for the sampling step |
+| iRacing telemetry | `.ibt` | the player's lap times (`LapLastLapTime`), fuel at lap start in kg (litres x the file's own `DriverCarFuelKgPerLtr`), pit-road flags |
+| RaceSim ACC session log | `.jsonl` | replayed through the live lap tracker; MOCK logs stay labelled MOCK |
+
+For logger files the out-lap and the unfinished last lap are left out, and laps
+that include a pit stop or garage time are flagged by the cleaning step, not
+removed. MoTeC files carry no tyre or fuel columns, so those analyses stay
+disabled for them. iRacing driver names are never copied into the data. The file
+type is detected from the content where possible. The dashboard accepts uploads
+up to 1 GB (`.streamlit/config.toml`).
 
 | Column | Type / unit | Notes |
 |---|---|---|

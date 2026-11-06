@@ -271,3 +271,18 @@ def test_display_tables_show_lap_times_in_race_format():
     pace = data.pace_display(data.pace_table(snap)).set_index("statistic")["value"]
     assert pace["Rolling pace, last 3 valid laps"] == "1:42.000" and pace["Standard deviation"].endswith(" s")
     assert pd.isna(pace["Rolling pace, last 5 valid laps"])
+
+
+def test_uploaded_session_log_gives_lap_table(tmp_path):
+    import io
+
+    from racesim.data_ingestion import load_race_dataframe, read_lap_file
+
+    s = Script()
+    path = _write_log(tmp_path, [(0.5, s.tel(0.5))] + drive(s, 0.5, 0, [101.0, 102.0, 103.0]))
+    df, label, notes = read_lap_file(io.BytesIO(path.read_bytes()), path.name)
+    res = load_race_dataframe(df, source=label)
+    assert "ACC session log" in label and "MOCK" not in label and res.report.valid
+    assert list(res.data["lap"]) == [1, 2, 3] and list(res.data["lap_time_s"]) == [101.0, 102.0, 103.0]
+    mock_path = _write_log(tmp_path, [(0.5, s.tel(0.5))] + drive(s, 0.5, 0, [101.0, 102.0]), mock=True)
+    assert read_lap_file(io.BytesIO(mock_path.read_bytes()), mock_path.name)[1].startswith("MOCK")

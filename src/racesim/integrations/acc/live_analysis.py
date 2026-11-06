@@ -248,6 +248,11 @@ class LiveAnalysis:
 def replay_session_log(path: Union[str, Path], *, thresholds: Optional[HealthConfig] = None) -> tuple[LiveAnalysis, float]:
     """Run a recorded log through the live code. Returns the analysis and the log's last time, for ``snapshot(now=...)``."""
     records, _ = read_session_log(path)
+    return replay_session_records(records, thresholds=thresholds)
+
+
+def replay_session_records(records: list[dict], *, thresholds: Optional[HealthConfig] = None) -> tuple[LiveAnalysis, float]:
+    """:func:`replay_session_log` for records already parsed (e.g. an uploaded log)."""
     analysis = LiveAnalysis(thresholds=thresholds, replay=True)
     last = 0.0
     for rec in records:

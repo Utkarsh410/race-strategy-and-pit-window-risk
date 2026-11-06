@@ -25,9 +25,13 @@ doubt: lap times written in race format (``1:50.485``, ``1:02:03.456``) in
 any lap-time or sector column, and ``lap_number`` for ``lap``. Headers are
 matched ignoring case, spaces and hyphens (``Lap Time`` -> ``lap_time``).
 
-:func:`read_lap_csv` reads an uploaded file: comma, semicolon or tab
-separated, with or without a byte-order mark, or a MoTeC i2 CSV export, whose
-lap times come from its beacon markers (see :mod:`racesim.integrations.motec`).
+:func:`read_lap_file` reads an uploaded file of any supported type
+(:data:`UPLOAD_TYPES`): lap tables as CSV / TSV / TXT (comma, semicolon or
+tab separated, with or without a byte-order mark), Excel, JSON, JSON Lines or
+Parquet; and laps derived from logger files - MoTeC i2 CSV exports and .ld
+logs (:mod:`racesim.integrations.motec`), iRacing .ibt telemetry
+(:mod:`racesim.integrations.iracing`) and RaceSim's own ACC session logs.
+The file type is detected from the content where it can be, not only the name.
 """
 
 from __future__ import annotations
@@ -57,7 +61,9 @@ AMBIGUOUS_UNIT_COLUMNS = {
     "fuel": "fuel_kg", "fuel_l": "fuel_kg", "tyre_age": "tyre_age_laps", "air_temp": "air_temp_c",
     "track_temp": "track_temp_c", "traffic_loss": "traffic_loss_s",
 }
-COLUMN_ALIASES = {"lap_number": "lap", "lap_no": "lap", "lap_num": "lap"}  # same meaning and unit
+# same meaning and unit (RaceSim's own ACC lap export uses the first-listed spellings)
+COLUMN_ALIASES = {"lap_number": "lap", "lap_no": "lap", "lap_num": "lap", "fuel_start_kg": "fuel_kg",
+                  "sector_1_s": "sector1_s", "sector_2_s": "sector2_s", "sector_3_s": "sector3_s"}
 RACE_FORMAT_COLUMNS = ("lap_time_s", "sector1_s", "sector2_s", "sector3_s")
 _TRUE = {"true", "1", "yes", "y", "t"}
 _FALSE = {"false", "0", "no", "n", "f", "", "nan", "none"}
@@ -211,6 +217,77 @@ def read_lap_csv(buffer: BinaryIO, name: str = "upload") -> tuple[pd.DataFrame, 
     df = pd.read_csv(buffer, sep=sep, encoding="utf-8-sig")
     notes = [] if sep == "," else [f"Separator detected: {'tab' if sep == chr(9) else repr(sep)}."]
     return df, f"Uploaded file: {name}", notes
+
+
+UPLOAD_TYPES = ("csv", "tsv", "txt", "xlsx", "json", "jsonl", "parquet", "ld", "ibt")
+
+
+def _records_frame(data: Any) -> pd.DataFrame:
+    """Lap records from parsed JSON: a list of objects, or an object with a 'laps' list."""
+    if isinstance(data, dict):
+        data = data.get("laps")
+    if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
+        raise ValueError("JSON must be a list of lap objects, or an object with a 'laps' list of them.")
+    return pd.DataFrame(data)
+
+
+def _session_log_laps(records: list[dict], name: str) -> tuple[pd.DataFrame, str, list[str]]:
+    from racesim.integrations.acc.live_analysis import replay_session_records
+
+    analysis, last = replay_session_records(records)
+    snap = analysis.snapshot(last)
+    laps = pd.DataFrame(snap.get("laps", []))
+    if laps.empty:
+        raise ValueError("The ACC session log holds no completed lap.")
+    kind = "MOCK ACC session log (synthetic, not ACC telemetry)" if snap.get("mock") else "Recorded ACC session log"
+    notes = [f"{kind}: {len(laps)} lap(s) of session {snap.get('session_key')}, replayed through the live lap tracker. "
+             "Tyre and fuel columns are filled only where the log carried them."]
+    if len(snap.get("sessions") or []) > 1:
+        notes.append(f"The log holds {len(snap['sessions'])} sessions; only the latest is loaded.")
+    return laps, f"{'MOCK ' if snap.get('mock') else ''}Uploaded ACC session log: {name}", notes
+
+
+def read_lap_file(buffer: BinaryIO, name: str = "upload") -> tuple[pd.DataFrame, str, list[str]]:
+    """Read any supported upload: ``(lap frame, data label, notes)``. Raises ``ValueError`` with a reason if it cannot."""
+    import json
+
+    from racesim.integrations.iracing import ibt_laps, is_ibt
+    from racesim.integrations.motec import is_motec_ld, ld_laps
+
+    ext = Path(name).suffix.lower().lstrip(".")
+    if is_motec_ld(buffer):
+        laps, header = ld_laps(buffer)
+        where = " / ".join(x for x in (header.venue, header.vehicle) if x)
+        return laps, f"Uploaded MoTeC .ld log: {name}" + (f" ({where})" if where else ""), header.notes
+    if is_ibt(buffer):
+        laps, info = ibt_laps(buffer)
+        where = " / ".join(x for x in (info.track, info.car) if x)
+        return laps, f"Uploaded iRacing telemetry: {name}" + (f" ({where})" if where else ""), info.notes
+    if ext in ("ld", "ibt"):
+        raise ValueError(f"{name} does not look like a {'MoTeC .ld log' if ext == 'ld' else 'iRacing .ibt file'} (unrecognised header).")
+    head = buffer.read(4)
+    buffer.seek(0)
+    if head[:2] == b"PK" or ext in ("xlsx", "xls"):
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            raise ValueError("Excel files need the openpyxl package, which is not installed. "
+                             "Install it with `.venv/bin/pip install openpyxl`, or save the sheet as CSV.") from None
+        df = pd.read_excel(buffer, sheet_name=0)
+        return df, f"Uploaded workbook: {name} (first sheet)", ["Read the first sheet of the workbook."]
+    if head == b"PAR1" or ext == "parquet":
+        return pd.read_parquet(buffer), f"Uploaded file: {name}", []
+    if ext in ("json", "jsonl"):
+        text = buffer.read().decode("utf-8-sig")
+        buffer.seek(0)
+        stripped = text.lstrip()
+        if ext == "jsonl" or (stripped.startswith("{") and "\n{" in stripped):
+            records = [json.loads(line) for line in text.splitlines() if line.strip()]
+            if records and records[0].get("record_type") == "session_start":
+                return _session_log_laps(records, name)
+            return pd.DataFrame(records), f"Uploaded file: {name}", []
+        return _records_frame(json.loads(text)), f"Uploaded file: {name}", []
+    return read_lap_csv(buffer, name)
 
 
 def load_race_csv(path: Union[str, Path], **kwargs: Any) -> IngestionResult:
